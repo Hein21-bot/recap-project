@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: smt_recap
+      POSTGRES_USER: smt
+      POSTGRES_PASSWORD: smt_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smt -d smt_recap"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./smt-recap
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      DEFAULT_VOICE_NAME: ${DEFAULT_VOICE_NAME:-Sadaltager}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: smt_recap
+      DB_USER: smt
+      DB_PASSWORD: smt_password
+      PORT: 3000
+    volumes:
+      - ./smt-recap/input:/app/input
+      - ./smt-recap/output:/app/output
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: ./smt-recap-ui
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
