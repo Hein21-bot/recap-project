@@ -1,7 +1,7 @@
 <template>
   <div class="max-w-2xl mx-auto px-6 py-10">
     <h2 class="text-2xl font-bold mb-1">Add Subtitles</h2>
-    <p class="text-gray-500 text-sm mb-8">Myanmar စာတန်းထိုး ထည့်မည် (blur + Pango render)</p>
+    <p class="text-gray-500 text-sm mb-8">Myanmar စာတန်းထိုး ထည့်မည် (Pango render)</p>
 
     <button @click="run" :disabled="running || done"
       class="w-full py-3 rounded-xl text-sm font-medium transition-colors"

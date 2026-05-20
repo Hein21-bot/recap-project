@@ -15,7 +15,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const FFMPEG_FULL = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
+const FFMPEG_FULL  = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
+const PANGO        = "/opt/homebrew/bin/pango-view";
+const CONVERT      = "/opt/homebrew/bin/convert";
+const WATERMARK_IMG = path.resolve("./assets/watermark.png");
 if (fs.existsSync(FFMPEG_FULL)) ffmpeg.setFfmpegPath(FFMPEG_FULL);
 
 const EXPORT_PRESETS = {
@@ -76,8 +79,8 @@ export async function step8Export(options = {}) {
   // Review summary
   await printReviewSummary(state, inputPath);
 
-  const resolution = options.resolution || "1080p";
-  const watermark  = (options.watermark || "").trim();
+  const resolution    = options.resolution || "1080p";
+  const thumbnailText = (options.thumbnailText || "").trim();
 
   // Detect input dimensions to preserve orientation (portrait/landscape)
   const meta = await getVideoMetadata(inputPath);
@@ -100,7 +103,15 @@ export async function step8Export(options = {}) {
   const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
   const outputPath = `./output/final/smt-recap${suffix}_${timestamp}.mp4`;
 
-  await exportVideo(inputPath, outputPath, { crf, preset: "slow", scale }, watermark);
+  // Render thumbnail text PNG via Pango (supports Myanmar + English)
+  let thumbnailPng = null;
+  if (thumbnailText) {
+    const outputW = isPortrait ? targetShort : Math.round(inputW * targetShort / inputH);
+    thumbnailPng = await renderThumbnailPng(thumbnailText, outputW);
+    console.log("[Step 8] Thumbnail PNG rendered:", thumbnailPng);
+  }
+
+  await exportVideo(inputPath, outputPath, { crf, preset: "slow", scale }, thumbnailPng);
 
   const fileSize = getFileSize(outputPath);
   saveState({ step8: { completed: true, exportPath: outputPath, resolution, completedAt: new Date().toISOString() } });
@@ -178,61 +189,157 @@ async function printReviewSummary(state, videoPath) {
   console.log(chalk.cyan("═".repeat(60) + "\n"));
 }
 
-function buildVf(scale, textFilePath) {
-  const parts = [];
-  if (textFilePath) {
-    parts.push(`drawtext=textfile=${textFilePath}:fontsize=45:fontcolor=white:x=w-tw-16:y=16:box=1:boxcolor=black@0.55:boxborderw=6`);
-  }
-  parts.push(scale);
-  return parts.join(",");
-}
+function exportVideo(inputPath, outputPath, preset, thumbnailPng = null) {
+  const hasWatermark  = fs.existsSync(WATERMARK_IMG);
+  const hasThumbnail  = thumbnailPng && fs.existsSync(thumbnailPng);
 
-function exportVideo(inputPath, outputPath, preset, watermark = "") {
-  let textFilePath = null;
-  if (watermark) {
-    textFilePath = path.join(os.tmpdir(), `smt_wm_${Date.now()}.txt`);
-    fs.writeFileSync(textFilePath, watermark, "utf8");
-    console.log("[Step 8] Watermark text:", watermark, "→ tempfile:", textFilePath);
-  }
-
-  const vf = buildVf(preset.scale, textFilePath);
-  const outputOptions = [
-    "-vf", vf,
-    "-c:v libx264",
-    "-c:a aac",
-    "-ar 48000",
-    "-ac 2",
-    "-b:a 192k",
-    `-crf ${preset.crf}`,
-    `-preset ${preset.preset}`,
-    "-profile:v high",
-    "-level 4.2",
-    "-movflags +faststart",
-    "-pix_fmt yuv420p",
+  const codecOptions = [
+    "-c:v", "libx264",
+    "-c:a", "aac",
+    "-ar", "48000",
+    "-ac", "2",
+    "-b:a", "192k",
+    "-crf", String(preset.crf),
+    "-preset", preset.preset,
+    "-profile:v", "high",
+    "-level", "4.2",
+    "-movflags", "+faststart",
+    "-pix_fmt", "yuv420p",
   ];
 
   return new Promise((resolve, reject) => {
     const spinner = ora("Exporting...").start();
+    const { spawn } = require("child_process");
+    const FFMPEG_BIN = fs.existsSync(FFMPEG_FULL) ? FFMPEG_FULL : "ffmpeg";
 
-    ffmpeg()
-      .input(inputPath)
-      .outputOptions(outputOptions)
-      .output(outputPath)
-      .on("progress", (progress) => {
-        if (progress.percent) spinner.text = `Exporting: ${Math.round(progress.percent)}%`;
-      })
-      .on("end", () => {
+    let args;
+
+    if (hasWatermark || hasThumbnail) {
+      // Build filter_complex with any combination of watermark image + thumbnail overlay
+      const inputs = ["-i", inputPath];
+      let inputIndex = 1;
+      let wmIndex = -1;
+      let thumbIndex = -1;
+
+      if (hasWatermark) {
+        inputs.push("-i", WATERMARK_IMG);
+        wmIndex = inputIndex++;
+      }
+      if (hasThumbnail) {
+        inputs.push("-i", thumbnailPng);
+        thumbIndex = inputIndex++;
+      }
+
+      // Chain: scale base → overlay watermark (bottom-right) → overlay thumbnail (center 0-5s)
+      let prevLabel = "0:v";
+      const filters = [];
+
+      filters.push(`[${prevLabel}]${preset.scale}[scaled]`);
+      prevLabel = "scaled";
+
+      if (wmIndex !== -1) {
+        filters.push(
+          `[${wmIndex}:v]scale=iw/8:-1,format=rgba,colorchannelmixer=aa=0.75[wm]`,
+          `[${prevLabel}][wm]overlay=W-w-20:20[wmout]`
+        );
+        prevLabel = "wmout";
+      }
+
+      if (thumbIndex !== -1) {
+        filters.push(
+          `[${prevLabel}][${thumbIndex}:v]overlay=x=(W-w)/2:y=H*0.20:enable='between(t,0,5)'[vout]`
+        );
+        prevLabel = "vout";
+      } else {
+        // rename last label to vout
+        filters[filters.length - 1] = filters[filters.length - 1].replace(`[${prevLabel}]`, "[vout]");
+        prevLabel = "vout";
+      }
+
+      args = [
+        ...inputs,
+        "-filter_complex", filters.join(";"),
+        "-map", "[vout]",
+        "-map", "0:a",
+        ...codecOptions,
+        "-y", outputPath,
+      ];
+    } else {
+      // No overlays — simple -vf scale
+      args = [
+        "-i", inputPath,
+        "-vf", preset.scale,
+        ...codecOptions,
+        "-y", outputPath,
+      ];
+    }
+
+    console.log("[Step 8] FFmpeg args:", args.join(" "));
+    const proc = spawn(FFMPEG_BIN, args);
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
+      const m = stderr.match(/time=(\d+:\d+:\d+\.\d+)/g);
+      if (m) spinner.text = `Exporting: ${m[m.length - 1]}`;
+    });
+    proc.on("close", (code) => {
+      if (code === 0) {
         spinner.succeed("Export complete");
-        if (textFilePath && fs.existsSync(textFilePath)) fs.unlinkSync(textFilePath);
         resolve();
-      })
-      .on("error", (err) => {
+      } else {
         spinner.fail("Export failed");
-        if (textFilePath && fs.existsSync(textFilePath)) fs.unlinkSync(textFilePath);
-        reject(err);
-      })
-      .run();
+        reject(new Error("Export failed:\n" + stderr.slice(-800)));
+      }
+    });
+    proc.on("error", reject);
   });
+}
+
+function renderThumbnailPng(text, videoWidth = 608) {
+  const { execFileSync } = require("child_process");
+  const tmpDir = path.join(os.tmpdir(), "smt-thumbnail");
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  const textFile = path.join(tmpDir, "thumb_text.txt");
+  const rawPng   = path.join(tmpDir, "thumb_raw.png");
+  const finalPng = path.join(tmpDir, "thumb_final.png");
+
+  fs.writeFileSync(textFile, text, "utf8");
+
+  execFileSync(PANGO, [
+    "--font=Noto Sans Myanmar Bold 26",
+    "--background=transparent",
+    "--foreground=#FFD700",
+    "--align=center",
+    `--width=${Math.floor(videoWidth * 0.80 * 0.75)}`,
+    "--wrap=word",
+    "-qo", rawPng,
+    textFile,
+  ]);
+
+  if (fs.existsSync(CONVERT)) {
+    const shadowPng = path.join(tmpDir, "thumb_shadow.png");
+    execFileSync(CONVERT, [
+      rawPng,
+      "(", "+clone",
+      "-background", "black",
+      "-shadow", "80x4+0+0",
+      ")",
+      "-reverse", "-background", "none", "-layers", "merge",
+      shadowPng,
+    ]);
+    execFileSync(CONVERT, [
+      shadowPng,
+      "-channel", "alpha", "-morphology", "Dilate", "Octagon:3",
+      "-fill", "black", "+opaque", "none",
+      shadowPng, "-composite",
+      finalPng,
+    ]);
+  } else {
+    fs.copyFileSync(rawPng, finalPng);
+  }
+
+  return finalPng;
 }
 
 function getVideoMetadata(filePath) {

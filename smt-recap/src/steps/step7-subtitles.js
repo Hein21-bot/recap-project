@@ -58,29 +58,10 @@ export async function step7AddSubtitles(options = {}) {
   const videoDims = getVideoDimensions(videoPath);
   logger.info(`Video dimensions: ${videoDims.w}x${videoDims.h}`);
 
-  // Detect subtitle position from the video frames
-  logger.info("Detecting original subtitle position...");
-  const subRegion = detectSubtitleY(videoPath);
-
-  let blurY, blurH;
-  if (subRegion) {
-    const PAD = 20;
-    blurY = Math.max(0, subRegion.topY - PAD);
-    blurH = Math.min(subRegion.bottomY - subRegion.topY + PAD * 2, videoDims.h - blurY);
-    console.log(`[Step 7] Detected subtitle region — blurY:${blurY} blurH:${blurH}`);
-  } else {
-    // Fallback: blur 68-88% zone (covers typical subtitle position)
-    blurY = Math.floor(videoDims.h * 0.68);
-    blurH = Math.floor(videoDims.h * 0.20);
-    console.warn(`[Step 7] Detection failed — falling back to 68-88% zone (y:${blurY} h:${blurH})`);
-  }
-
-  const blurStrip = [{ startT: 0, endT: 9999, x: 0, y: blurY, w: videoDims.w, h: blurH }];
-
   // Embed subtitles into video
   const outputPath = "./output/video/subtitled-video.mp4";
 
-  await burnSubtitles(videoPath, srtPath, outputPath, blurStrip, blurY, blurH, videoDims);
+  await burnSubtitles(videoPath, srtPath, outputPath, videoDims);
 
   saveState({ step7: { completed: true, srtPath, assPath, subtitledVideoPath: outputPath } });
   logger.success(`Subtitled video → ${outputPath}`);
@@ -112,24 +93,27 @@ function generateSimpleSRT(text, audioDuration = null) {
   }
   if (current) chunks.push(current);
 
-  // Pure proportional timing: each chunk gets time proportional to its char count.
-  // No offset, no min-duration — this keeps subtitles in sync with voice throughout.
-  const totalChars = chunks.reduce((sum, c) => sum + c.length, 0);
-  const totalDuration = (audioDuration && audioDuration > 0) ? audioDuration : totalChars * 0.12;
+  // Myanmar syllable-aware timing: count base consonant clusters, not raw chars.
+  // Combining marks (်, ြ, ွ, ာ etc.) stack onto a base letter but add no speaking time.
+  const syllableCounts = chunks.map(myanmarSyllableCount);
+  const totalSyllables = syllableCounts.reduce((sum, n) => sum + n, 0);
+  const totalDuration = (audioDuration && audioDuration > 0) ? audioDuration : totalSyllables * 0.3;
 
   let srt = '';
   let index = 1;
-  let charOffset = 0;
+  let syllableOffset = 0;
 
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
     if (!chunk.trim()) continue;
-    const startTime = (charOffset / totalChars) * totalDuration;
-    const endTime = ((charOffset + chunk.length) / totalChars) * totalDuration;
+    const sc = syllableCounts[i];
+    const startTime = (syllableOffset / totalSyllables) * totalDuration;
+    const endTime = ((syllableOffset + sc) / totalSyllables) * totalDuration;
     srt += index + '\n';
     srt += formatSRTTime(startTime) + ' --> ' + formatSRTTime(endTime) + '\n';
     srt += chunk.trim() + '\n\n';
     index++;
-    charOffset += chunk.length;
+    syllableOffset += sc;
   }
 
   return srt;
@@ -310,7 +294,7 @@ function getVideoDimensions(videoPath) {
 }
 
 
-function burnSubtitles(videoPath, srtPath, outputPath, blurRanges = [], blurY = null, blurH = null, videoDims = { w: 1080, h: 1920 }) {
+function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h: 1920 }) {
   return new Promise((resolve, reject) => {
     const spinner = ora("Rendering subtitles with Pango/HarfBuzz...").start();
 
@@ -332,7 +316,7 @@ function burnSubtitles(videoPath, srtPath, outputPath, blurRanges = [], blurY = 
       return;
     }
 
-    // Step 1: render each subtitle line as a PNG via pango-view (HarfBuzz shaping)
+    // Render each subtitle line as a PNG via pango-view (HarfBuzz shaping)
     const tmpDir = path.join(os.tmpdir(), "smt-subtitles");
     if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -344,35 +328,33 @@ function burnSubtitles(videoPath, srtPath, outputPath, blurRanges = [], blurY = 
 
       fs.writeFileSync(textFile, entries[i].text, "utf8");
 
-      // Render white text on transparent background
-      // Font size scaled to video width: ~4.5% of width, min 14, max 22
-      const fontSize = Math.max(24, Math.min(42, Math.round(videoDims.w * 0.036)));
+      const fontSize = 14;
+      const videoWidth = videoDims?.w || 608;
       execFileSync(PANGO, [
         `--font=Noto Sans Myanmar Bold ${fontSize}`,
         "--background=transparent",
-        "--foreground=white",
+        "--foreground=#FFD700",
         "--align=center",
+        `--width=${Math.floor(videoWidth * 0.80 * 0.75)}`,
+        "--wrap=word",
         "-qo", rawPng,
         textFile,
       ]);
 
-      // Add black outline + drop shadow via ImageMagick for readability
       if (fs.existsSync(CONVERT)) {
         const shadowPng = path.join(tmpDir, `sub${i}_shadow.png`);
-        // Step 1: create drop shadow (offset 2x2, blur radius 3, semi-transparent black)
         execFileSync(CONVERT, [
           rawPng,
           "(", "+clone",
           "-background", "black",
-          "-shadow", "70x3+2+2",
+          "-shadow", "80x4+0+0",
           ")",
           "-reverse", "-background", "none", "-layers", "merge",
           shadowPng,
         ]);
-        // Step 2: add black outline on top of the shadow result
         execFileSync(CONVERT, [
           shadowPng,
-          "-channel", "alpha", "-morphology", "Dilate", "Octagon:2",
+          "-channel", "alpha", "-morphology", "Dilate", "Octagon:3",
           "-fill", "black", "+opaque", "none",
           shadowPng, "-composite",
           finalPng,
@@ -384,31 +366,15 @@ function burnSubtitles(videoPath, srtPath, outputPath, blurRanges = [], blurY = 
       pngPaths.push(finalPng);
     }
 
-    spinner.text = "Compositing subtitles into video...";
-
-    // Two-pass approach to avoid ffmpeg filter_complex limits:
-    // Pass 1: blur original subtitle regions → temp file
-    // Pass 2: overlay Myanmar PNGs → final output
-
-    const blurredPath = path.join(os.tmpdir(), `smt-blurred-${Date.now()}.mp4`);
-
-    // Pass 1: blur
-    runPass1(FFMPEG_BIN, videoPath, blurRanges, blurredPath)
+    spinner.text = "Overlaying Myanmar subtitles...";
+    runPass2(FFMPEG_BIN, videoPath, entries, pngPaths, outputPath, spinner)
       .then(() => {
-        spinner.text = "Overlaying Myanmar subtitles...";
-        // Pass 2: overlay PNGs
-        const blurCenterY = blurY !== null && blurH !== null ? blurY + Math.floor(blurH / 2) : null;
-        return runPass2(FFMPEG_BIN, blurredPath, entries, pngPaths, outputPath, spinner, blurCenterY);
-      })
-      .then(() => {
-        try { fs.unlinkSync(blurredPath); } catch (_) { }
         spinner.succeed("Subtitles burned (Pango/HarfBuzz)");
         resolve();
       })
       .catch((err) => {
         console.error("[Step 7] Subtitle burn FAILED:", err.message);
         spinner.fail("Subtitle burn failed: " + err.message);
-        try { if (fs.existsSync(blurredPath)) fs.unlinkSync(blurredPath); } catch (_) { }
         reject(err);
       });
   });
@@ -471,7 +437,7 @@ function runPass1(ffmpegBin, videoPath, blurRanges, outputPath) {
   });
 }
 
-function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner, subtitleY = null) {
+function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner) {
   return new Promise((resolve, reject) => {
     const { spawn } = require("child_process");
 
@@ -491,7 +457,7 @@ function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner, 
       const e = entries[i];
       const outLabel = i < entries.length - 1 ? `mv${i}` : "vout";
       filterComplex +=
-        `[${prevLabel}][${i + 1}:v]overlay=x=(W-w)/2:y=${subtitleY !== null ? subtitleY + '-h/2' : 'H-h-40'}` +
+        `[${prevLabel}][${i + 1}:v]overlay=x=(W-w)/2:y=H*0.70-h` +
         `:enable='between(t,${e.start},${e.end})'[${outLabel}]`;
       if (i < entries.length - 1) filterComplex += ";";
       prevLabel = outLabel;
@@ -525,6 +491,15 @@ function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner, 
     });
     proc.on("error", reject);
   });
+}
+
+// Count Myanmar syllable clusters instead of raw characters.
+// A cluster = base consonant (U+1000–U+102A) + any trailing combining marks (U+102B–U+103E).
+// This prevents stacking diacritics (်, ြ, ွ, ာ …) from inflating the character count
+// and making subtitles appear longer than the voice actually speaks them.
+function myanmarSyllableCount(str) {
+  const clusters = str.match(/[က-ဪဿ][ါ-ှ]*/g);
+  return clusters ? clusters.length : Math.max(1, Math.ceil(str.length / 3));
 }
 
 // Utility functions

@@ -332,20 +332,22 @@ app.post("/api/step/7/subtitles", async (req, res) => {
 
 // ── Step 8: Export ────────────────────────────────────────────────────────────
 app.post("/api/step/8/export", async (req, res) => {
-  const { jobId, resolution, watermark, sessionId } = req.body;
-  console.log("[Step 8] Route hit — jobId:", jobId, "resolution:", resolution, "watermark:", watermark, "sessionId:", sessionId);
+  const { jobId, resolution, watermark, thumbnailText, sessionId } = req.body;
+  console.log("[Step 8] Route hit — jobId:", jobId, "resolution:", resolution, "watermark:", watermark, "thumbnailText:", thumbnailText, "sessionId:", sessionId);
   res.json({ started: true });
   console.log("[Step 8] Response sent, starting export...");
 
   try {
     console.log("[Step 8] Entering try block...");
     emit(jobId, "log", { message: `${resolution || "1080p"} ဖြင့် Export လုပ်နေသည်...` });
+    if (thumbnailText) emit(jobId, "log", { message: `Thumbnail စာသား ထည့်သွင်းနေသည်...` });
     console.log("[Step 8] Loading session...");
     const state = await getSession(sessionId);
     console.log("[Step 8] Calling step8Export — resolution:", resolution || "1080p");
     const { outputPath, fileSize } = await step8Export({
       resolution: resolution || "1080p",
       watermark: watermark || "",
+      thumbnailText: thumbnailText || "",
       inputPath: state.step7?.subtitledVideoPath || "./output/video/subtitled-video.mp4",
     });
     console.log("[Step 8] Saving session...");

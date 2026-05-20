@@ -31,6 +31,6 @@ export const api = {
   generateAudio:   (jobId)        => post("/step/5/generate",    { jobId }),
   syncVideo:       (jobId)        => post("/step/6/sync",        { jobId }),
   addSubtitles:    (jobId)        => post("/step/7/subtitles",   { jobId }),
-  exportVideo:     (jobId, res, watermark) => post("/step/8/export", { jobId, resolution: res, watermark }),
+  exportVideo:     (jobId, res, watermark, thumbnailText) => post("/step/8/export", { jobId, resolution: res, watermark, thumbnailText }),
   downloadFinal:   ()             => window.open(`${BASE}/download?sessionId=${getSessionId()}`, "_blank"),
 };
