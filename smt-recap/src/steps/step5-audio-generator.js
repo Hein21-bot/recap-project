@@ -46,11 +46,17 @@ export async function step5GenerateAudio(options = {}) {
   logger.info(`Text length: ${cleanText.length} characters`);
 
   // Prefer Gemini (same key, free quota); fall back to ElevenLabs
+  let result;
   if (geminiKey) {
-    return await generateWithGemini(cleanText, voiceKey, speedMultiplier, geminiKey);
+    result = await generateWithGemini(cleanText, voiceKey, speedMultiplier, geminiKey);
   } else {
-    return await generateWithElevenLabs(cleanText, state, speedMultiplier, elevenKey);
+    result = await generateWithElevenLabs(cleanText, state, speedMultiplier, elevenKey);
   }
+
+  // Run forced alignment to get per-sentence timestamps for perfect subtitle sync
+  await runForcedAlignment(result.audioPath, cleanText);
+
+  return result;
 }
 
 async function generateWithGemini(text, voiceKey, speedMultiplier, apiKey) {
@@ -63,19 +69,14 @@ async function generateWithGemini(text, voiceKey, speedMultiplier, apiKey) {
     logger.info(`Voice: ${voice.name} (Gemini TTS)`);
     logger.info(`Target speed: ${speedMultiplier}x`);
 
-    // Gemini TTS uses speech config in the generation request
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-pro-preview-tts",   // Gemini 2.5 Pro TTS
-    });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro-preview-tts" });
 
     const response = await model.generateContent({
       contents: [{ role: "user", parts: [{ text }] }],
       generationConfig: {
         responseModalities: ["AUDIO"],
         speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: voice.name },
-          },
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: voice.name } },
         },
       },
     });
@@ -83,54 +84,40 @@ async function generateWithGemini(text, voiceKey, speedMultiplier, apiKey) {
     const audioPart = response.response.candidates?.[0]?.content?.parts?.find(
       (p) => p.inlineData?.mimeType?.startsWith("audio/")
     );
-
     if (!audioPart) throw new Error("No audio returned from Gemini TTS");
 
-    const mimeType   = audioPart.inlineData.mimeType; // e.g. "audio/pcm;rate=24000" or "audio/wav"
-    const rawBuffer  = Buffer.from(audioPart.inlineData.data, "base64");
+    const mimeType  = audioPart.inlineData.mimeType;
+    const rawBuffer = Buffer.from(audioPart.inlineData.data, "base64");
 
-    // Gemini TTS returns raw PCM (L16) — wrap it in a proper WAV container
     let audioBuffer;
     if (mimeType.includes("pcm") || !mimeType.includes("wav")) {
-      const sampleRate  = parseInt(mimeType.match(/rate=(\d+)/)?.[1] || "24000");
+      const sampleRate = parseInt(mimeType.match(/rate=(\d+)/)?.[1] || "24000");
       audioBuffer = pcmToWav(rawBuffer, sampleRate, 1, 16);
     } else {
       audioBuffer = rawBuffer;
     }
 
-    const rawPath = "./output/audio/narration_raw.wav";
-    const outputPath  = "./output/audio/narration.wav";
+    const rawPath    = "./output/audio/narration_raw.wav";
+    const outputPath = "./output/audio/narration.wav";
     writeBinaryFile(rawPath, audioBuffer);
 
-    // Speed up audio using ffmpeg atempo filter
+    const { execFileSync } = await import("child_process");
+    const FFMPEG = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
+
     if (speedMultiplier && speedMultiplier !== 1.0) {
-      const { execFileSync } = await import("child_process");
-      const FFMPEG = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
-      execFileSync(FFMPEG, [
-        "-i", rawPath,
-        "-filter:a", `atempo=${speedMultiplier}`,
-        "-y", outputPath,
-      ], { stdio: "pipe" });
+      execFileSync(FFMPEG, ["-i", rawPath, "-filter:a", `atempo=${speedMultiplier}`, "-y", outputPath], { stdio: "pipe" });
       logger.info(`Audio sped up to ${speedMultiplier}x`);
     } else {
-      const { execFileSync } = await import("child_process");
-      const FFMPEG = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
       execFileSync(FFMPEG, ["-i", rawPath, "-y", outputPath], { stdio: "pipe" });
     }
 
     spinner.succeed("Gemini TTS audio generated!");
 
-    writeFile(
-      "./output/audio/narration-meta.json",
-      JSON.stringify({
-        provider: "gemini",
-        voiceName: voice.name,
-        speedMultiplier,
-        textLength: text.length,
-        fileSizeMB: (audioBuffer.length / (1024 * 1024)).toFixed(2),
-        generatedAt: new Date().toISOString(),
-      }, null, 2)
-    );
+    writeFile("./output/audio/narration-meta.json", JSON.stringify({
+      provider: "gemini", voiceName: voice.name, speedMultiplier,
+      textLength: text.length, fileSizeMB: (audioBuffer.length / (1024 * 1024)).toFixed(2),
+      generatedAt: new Date().toISOString(),
+    }, null, 2));
 
     saveState({ step5: { completed: true, audioPath: outputPath, provider: "gemini" } });
     logger.success(`Audio saved → ${outputPath}`);
@@ -205,6 +192,57 @@ export async function getAudioDuration(audioPath) {
     return isNaN(val) ? null : val;
   } catch {
     return null;
+  }
+}
+
+// Run forced alignment: audio + script → per-sentence timestamps
+async function runForcedAlignment(audioPath, scriptText) {
+  const spinner = ora("Running forced alignment for perfect subtitle sync...").start();
+  try {
+    const { execFileSync } = await import("child_process");
+    const { mkdirSync } = await import("fs");
+    const os   = await import("os");
+    const path = await import("path");
+
+    mkdirSync("./output/audio", { recursive: true });
+
+    // Write script to temp file
+    const tmpDir      = path.join(os.tmpdir(), "smt-align");
+    mkdirSync(tmpDir, { recursive: true });
+    const scriptFile  = path.join(tmpDir, "script.txt");
+    const outputJson  = "./output/sentence-durations.json";
+
+    // Clean script — remove pause markers, keep sentence structure
+    const cleanScript = scriptText
+      .replace(/\[pause[^\]]*\]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // Split into sentences for alignment
+    const sentences = cleanScript
+      .split(/(?<=[၊။])\s*/)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    // Write sentences one per line for alignment
+    const { writeFileSync } = await import("fs");
+    writeFileSync(scriptFile, sentences.join("\n"), "utf8");
+
+    // Run Python forced alignment script
+    const pyScript = path.join(path.dirname(new URL(import.meta.url).pathname), "../utils/forced_align.py");
+
+    const result = execFileSync("python3", [
+      pyScript,
+      "--audio", audioPath,
+      "--transcript", scriptFile,
+      "--output", outputJson,
+    ], { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+
+    spinner.succeed("Forced alignment complete → sentence-durations.json");
+    logger.info(result.trim());
+  } catch (err) {
+    spinner.warn(`Forced alignment failed (subtitle sync will be approximate): ${err.message}`);
+    // Non-fatal — Step 7 will fall back to syllable-based timing
   }
 }
 

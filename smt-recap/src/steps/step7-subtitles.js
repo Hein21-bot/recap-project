@@ -70,9 +70,68 @@ export async function step7AddSubtitles(options = {}) {
 }
 
 function generateSRT(scriptData, audioDuration = null) {
+  // Try perfect sync first — use per-sentence durations from Step 5
+  const durationsData = (() => {
+    try { return readJSON("./output/sentence-durations.json"); } catch (_) { return null; }
+  })();
+
+  if (durationsData?.sentences?.length > 0) {
+    logger.info("Using per-sentence durations for perfect subtitle sync");
+    return generatePerfectSRT(durationsData.sentences);
+  }
+
+  // Fallback: syllable-based approximate timing
+  logger.info("Falling back to syllable-based subtitle timing");
   const fullText = scriptData.formattedText || scriptData.fullScript || "";
-  // Always generate from full text with real audio timing — section timestamps are unreliable
   return generateSimpleSRT(fullText, audioDuration);
+}
+
+function generatePerfectSRT(sentences) {
+  let srt = "";
+  let index = 1;
+  let currentTime = 0;
+
+  for (const { text, duration } of sentences) {
+    if (!text.trim() || duration <= 0) {
+      currentTime += duration;
+      continue;
+    }
+
+    // Split long sentences into display chunks (~28 chars) but keep timing proportional
+    const chunks = splitSentenceIntoChunks(text, 28);
+    const chunkDuration = duration / chunks.length;
+
+    for (const chunk of chunks) {
+      if (!chunk.trim()) continue;
+      const start = currentTime;
+      const end   = currentTime + chunkDuration;
+      srt += `${index}\n`;
+      srt += `${formatSRTTime(start)} --> ${formatSRTTime(end)}\n`;
+      srt += `${chunk.trim()}\n\n`;
+      index++;
+      currentTime = end;
+    }
+  }
+
+  return srt;
+}
+
+function splitSentenceIntoChunks(text, maxLen) {
+  const words = text.split(" ").filter(Boolean);
+  const chunks = [];
+  let current = "";
+  for (const word of words) {
+    if (current === "") {
+      current = word;
+    } else if ((current + " " + word).length <= maxLen) {
+      current += " " + word;
+    } else {
+      chunks.push(current);
+      current = word;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 function generateSimpleSRT(text, audioDuration = null) {

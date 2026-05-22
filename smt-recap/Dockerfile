@@ -15,8 +15,15 @@ RUN apt-get update && apt-get install -y \
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp
 
-# Python Pillow for subtitle region detection
-RUN pip3 install Pillow --break-system-packages
+# Python dependencies: subtitle detection + forced alignment
+RUN pip3 install --break-system-packages \
+    Pillow \
+    ctc-forced-aligner \
+    torch \
+    torchaudio \
+    librosa \
+    unidecode \
+    numpy
 
 # Symlinks to match hardcoded macOS paths in source
 RUN mkdir -p /opt/homebrew/bin /opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin && \
