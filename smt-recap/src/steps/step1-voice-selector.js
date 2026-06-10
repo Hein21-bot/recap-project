@@ -30,22 +30,8 @@ export async function step2SelectVoice(options = {}) {
     return voice;
   }
 
-  // Interactive selection
-  const choices = Object.entries(VOICES).map(([key, v]) => ({
-    name: `${v.name} — ${v.description}`,
-    value: key,
-  }));
-
-  const { voiceKey } = await inquirer.prompt([
-    {
-      type: "list",
-      name: "voiceKey",
-      message: "သင့် Brand Voice ကို ရွေးချယ်ပါ:",
-      choices,
-      default: "sadaltager",
-    },
-  ]);
-
+  // In web server context, no valid voiceKey was provided — use default
+  const voiceKey = "sadaltager";
   const voice = VOICES[voiceKey];
   logger.success(`Selected: ${voice.name}`);
   logger.info(`Voice ID: ${voice.id}`);

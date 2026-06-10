@@ -30,6 +30,9 @@ export async function step7AddSubtitles(options = {}) {
   const srtPath = "./output/subtitles/subtitles.srt";
   const assPath = "./output/subtitles/subtitles.ass";
 
+  // Try forced alignment to get precise per-sentence timestamps
+  await tryForcedAlign(audioPath);
+
   // Get actual audio duration so subtitles match what the voice is saying
   let audioDuration = null;
   if (fs.existsSync(audioPath)) {
@@ -67,6 +70,34 @@ export async function step7AddSubtitles(options = {}) {
   logger.success(`Subtitled video → ${outputPath}`);
 
   return { outputPath, srtPath, assPath };
+}
+
+async function tryForcedAlign(audioPath) {
+  const path = require("path");
+  const { spawnSync } = require("child_process");
+
+  const scriptPy = path.resolve("./src/utils/forced_align.py");
+  const transcriptPath = "./output/tts-input.txt";
+  const outputPath = "./output/sentence-durations.json";
+
+  if (!fs.existsSync(scriptPy) || !fs.existsSync(audioPath) || !fs.existsSync(transcriptPath)) {
+    logger.info("Skipping forced alignment (missing files)");
+    return;
+  }
+
+  logger.info("Running forced alignment for precise subtitle timing...");
+  const PYTHON = "/opt/homebrew/bin/python3";
+  const result = spawnSync(PYTHON, [scriptPy, "--audio", audioPath, "--transcript", transcriptPath, "--output", outputPath], {
+    encoding: "utf8",
+    timeout: 120000,
+  });
+
+  if (result.status === 0) {
+    logger.success("Forced alignment complete → " + outputPath);
+  } else {
+    logger.warn("Forced alignment failed, using fallback timing");
+    if (result.stderr) logger.warn(result.stderr.slice(0, 300));
+  }
 }
 
 function generateSRT(scriptData, audioDuration = null) {

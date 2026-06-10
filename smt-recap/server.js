@@ -6,6 +6,7 @@
 
 import "dotenv/config";
 import express from "express";
+import cors from "cors";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -26,6 +27,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(cors());
 app.use(express.json());
 app.use("/output", express.static(path.join(__dirname, "output")));
 
@@ -64,7 +66,8 @@ app.post("/api/reset", async (req, res) => {
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   }
   ["./output/script.json", "./output/script-raw.txt", "./output/script-formatted.json",
-    "./output/tts-input.txt", "./output/pipeline-state.json"].forEach(f => {
+    "./output/tts-input.txt", "./output/pipeline-state.json",
+    "./output/sentence-durations.json"].forEach(f => {
       if (fs.existsSync(f)) fs.rmSync(f);
     });
   if (fs.existsSync("./input/video.mp4")) fs.rmSync("./input/video.mp4");
@@ -321,7 +324,7 @@ app.post("/api/step/7/subtitles", async (req, res) => {
       audioPath: state.step5?.audioPath || "./output/audio/narration.wav",
     });
     console.log("[Step 7] Saving session...");
-    await saveSession(sessionId, { step7: { completed: true, ...result } });
+    await saveSession(sessionId, { step7: { completed: true, subtitledVideoPath: result.outputPath, ...result } });
     console.log("[Step 7] SUCCESS — outputPath:", result.outputPath);
     emit(jobId, "done", { success: true, ...result });
   } catch (err) {

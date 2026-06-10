@@ -33,6 +33,7 @@
         v-model="script"
         rows="16"
         class="w-full bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 text-sm leading-relaxed focus:outline-none focus:border-sky-500 resize-none transition-colors"
+        @input="unsaved = true"
       />
       <p v-if="saved" class="text-emerald-400 text-xs mt-2">✓ Saved</p>
     </div>
@@ -48,6 +49,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from "vue";
+import { onBeforeRouteLeave } from "vue-router";
 import { api } from "@/api/pipeline.js";
 import { useSSE, makeJobId } from "@/composables/useSSE.js";
 import { usePipelineStore } from "@/stores/pipeline.js";
@@ -56,10 +58,17 @@ import LogStream from "@/components/LogStream.vue";
 const store = usePipelineStore();
 const { logs, done, result, connect, startPolling } = useSSE();
 
-const script  = ref("");
-const saved   = ref(false);
-const running = ref(false);
-const error   = ref("");
+const script   = ref("");
+const saved    = ref(false);
+const running  = ref(false);
+const error    = ref("");
+const unsaved  = ref(false);
+
+onBeforeRouteLeave(() => {
+  if (unsaved.value) {
+    return confirm("Script ကို မသိမ်းရသေးပါ။ ဆက်သွားမှာလား?");
+  }
+});
 
 const wordCount = computed(() => script.value.split(/\s+/).filter(Boolean).length);
 
@@ -103,6 +112,7 @@ async function generate() {
 async function save() {
   await api.saveScript(script.value);
   saved.value = true;
+  unsaved.value = false;
   setTimeout(() => (saved.value = false), 2000);
 }
 </script>
