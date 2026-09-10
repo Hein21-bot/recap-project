@@ -1,7 +1,10 @@
 /**
  * Step 5: Audio Generation (Text-to-Speech)
- * Uses Gemini TTS (gemini-2.5-flash-preview-tts) — same API key as Step 1
- * Falls back to ElevenLabs if ELEVENLABS_API_KEY is set
+ * Two providers, chosen by the user in the UI:
+ *   - "gemini"    → Gemini TTS (gemini-2.5-pro-preview-tts), same key as Step 1
+ *   - "clipchamp" → Microsoft Edge / Clipchamp neural voices via msedge-tts.
+ *                   Same my-MM voices Clipchamp uses, but no API key / account.
+ * Falls back to ElevenLabs if only ELEVENLABS_API_KEY is set.
  */
 
 import ora from "ora";
@@ -18,13 +21,25 @@ const GEMINI_VOICES = {
   kore:       { name: "Kore",       style: "warm and youthful" },      // youthful
 };
 
+// Clipchamp = Microsoft Edge neural voices. Native Myanmar (my-MM) voices,
+// reached through msedge-tts (no API key, no account, free).
+// Keyed by the same voiceKey the rest of the pipeline uses.
+const CLIPCHAMP_VOICES = {
+  sadaltager: { name: "my-MM-ThihaNeural", label: "Thiha (male, calm)" },
+  charon:     { name: "my-MM-ThihaNeural", label: "Thiha (male, documentary)" },
+  puck:       { name: "my-MM-NilarNeural", label: "Nilar (female, energetic)" },
+  kore:       { name: "my-MM-NilarNeural", label: "Nilar (female, youthful)" },
+};
+
 export async function step5GenerateAudio(options = {}) {
-  logger.step(5, "Generating audio with Gemini TTS...");
+  const provider = (options.provider || "gemini").toLowerCase();
+  logger.step(5, `Generating audio with ${provider === "clipchamp" ? "Clipchamp (Edge neural voice)" : "Gemini TTS"}...`);
 
   const geminiKey = process.env.GEMINI_API_KEY;
-  const elevenKey  = process.env.ELEVENLABS_API_KEY;
+  const elevenKey = process.env.ELEVENLABS_API_KEY;
 
-  if (!geminiKey && !elevenKey) {
+  // "clipchamp" needs no key. Only bail if nothing at all is usable.
+  if (provider !== "clipchamp" && !geminiKey && !elevenKey) {
     throw new Error("No API key found. Set GEMINI_API_KEY in .env");
   }
 
@@ -45,9 +60,10 @@ export async function step5GenerateAudio(options = {}) {
   const cleanText = stripPauseMarkersForElevenLabs(scriptText);
   logger.info(`Text length: ${cleanText.length} characters`);
 
-  // Prefer Gemini (same key, free quota); fall back to ElevenLabs
   let result;
-  if (geminiKey) {
+  if (provider === "clipchamp") {
+    result = await generateWithClipchamp(cleanText, voiceKey, speedMultiplier);
+  } else if (geminiKey) {
     result = await generateWithGemini(cleanText, voiceKey, speedMultiplier, geminiKey);
   } else {
     result = await generateWithElevenLabs(cleanText, state, speedMultiplier, elevenKey);
@@ -69,7 +85,8 @@ async function generateWithGemini(text, voiceKey, speedMultiplier, apiKey) {
     logger.info(`Voice: ${voice.name} (Gemini TTS)`);
     logger.info(`Target speed: ${speedMultiplier}x`);
 
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro-preview-tts" });
+    const ttsModel = process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
+    const model = genAI.getGenerativeModel({ model: ttsModel });
 
     const response = await model.generateContent({
       contents: [{ role: "user", parts: [{ text }] }],
@@ -126,6 +143,118 @@ async function generateWithGemini(text, voiceKey, speedMultiplier, apiKey) {
     return { audioPath: outputPath, buffer: audioBuffer };
   } catch (err) {
     spinner.fail("Gemini TTS failed");
+    throw err;
+  }
+}
+
+// "Clipchamp" voice option. Two engines, auto-selected:
+//   - AZURE_SPEECH_KEY set  → real Azure Speech REST API (full catalog, incl.
+//                             it-IT-AlessioMultilingualNeural)
+//   - otherwise             → free Microsoft Edge voices via msedge-tts
+// Voice order: CLIPCHAMP_VOICE env → per-style my-MM default.
+// Multilingual voices read Burmese via CLIPCHAMP_LANG (default my-MM) forced
+// in SSML. Speed is baked in via SSML <prosody rate>.
+async function generateWithClipchamp(text, voiceKey, speedMultiplier) {
+  const spinner = ora("Generating Clipchamp voice...").start();
+
+  try {
+    const styleDefault = (CLIPCHAMP_VOICES[voiceKey] || CLIPCHAMP_VOICES.sadaltager).name;
+    const voiceName = (process.env.CLIPCHAMP_VOICE || styleDefault).trim();
+    const lang = (process.env.CLIPCHAMP_LANG || "my-MM").trim();
+
+    // speedMultiplier 1.3 → rate "+30%", 0.9 → rate "-10%"
+    const ratePct = Math.round((speedMultiplier - 1) * 100);
+    const rate = `${ratePct >= 0 ? "+" : ""}${ratePct}%`;
+
+    const azureKey    = process.env.AZURE_SPEECH_KEY;
+    const azureRegion = process.env.AZURE_SPEECH_REGION;
+    const useAzure    = Boolean(azureKey && azureRegion);
+
+    const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                        .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+    const ssml =
+      `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${lang}">` +
+      `<voice name="${voiceName}"><prosody rate="${rate}">${esc(text)}</prosody></voice>` +
+      `</speak>`;
+
+    logger.info(`Voice: ${voiceName} @ ${lang} (${useAzure ? "Azure Speech" : "Edge"})`);
+    logger.info(`Target speed: ${speedMultiplier}x (SSML rate ${rate})`);
+
+    let rawBuffer, rawExt;
+
+    if (useAzure) {
+      const { default: fetch } = await import("node-fetch");
+      const res = await fetch(`https://${azureRegion}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+        method: "POST",
+        headers: {
+          "Ocp-Apim-Subscription-Key": azureKey,
+          "Content-Type": "application/ssml+xml",
+          "X-Microsoft-OutputFormat": "riff-24khz-16bit-mono-pcm",
+          "User-Agent": "smt-recap",
+        },
+        body: ssml,
+      });
+      if (!res.ok) throw new Error(`Azure Speech error ${res.status}: ${await res.text()}`);
+      rawBuffer = Buffer.from(await res.arrayBuffer());
+      rawExt = "wav";
+    } else {
+      const { MsEdgeTTS, OUTPUT_FORMAT } = await import("msedge-tts");
+      const tts = new MsEdgeTTS();
+
+      const available = (await tts.getVoices()).map((v) => v.ShortName);
+      if (!available.includes(voiceName)) {
+        const myMM = available.filter((v) => v.startsWith("my-MM"));
+        const multi = available.filter((v) => /Multilingual/.test(v)).slice(0, 6);
+        throw new Error(
+          `Voice "${voiceName}" isn't on the free Edge route. ` +
+          `Set AZURE_SPEECH_KEY + AZURE_SPEECH_REGION in .env to use the full Azure catalog ` +
+          `(e.g. it-IT-AlessioMultilingualNeural), or pick a free one via CLIPCHAMP_VOICE: ` +
+          `${[...myMM, ...multi].join(", ")}`
+        );
+      }
+
+      await tts.setMetadata(voiceName, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
+      // rawToStream keeps our xml:lang so multilingual voices speak Burmese
+      const { audioStream } = await tts.rawToStream(ssml);
+      const chunks = [];
+      await new Promise((resolve, reject) => {
+        audioStream.on("data", (c) => chunks.push(c));
+        audioStream.on("end", resolve);
+        audioStream.on("error", reject);
+      });
+      rawBuffer = Buffer.concat(chunks);
+      rawExt = "mp3";
+    }
+    if (!rawBuffer?.length) throw new Error("No audio returned from Clipchamp voice");
+
+    // Normalise to WAV so every downstream step stays unchanged
+    const rawPath    = `./output/audio/narration_raw.${rawExt}`;
+    const outputPath = "./output/audio/narration.wav";
+    writeBinaryFile(rawPath, rawBuffer);
+
+    const { execFileSync } = await import("child_process");
+    const FFMPEG = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
+    execFileSync(FFMPEG, ["-i", rawPath, "-ar", "24000", "-ac", "1", "-y", outputPath], { stdio: "pipe" });
+
+    const { readFileSync } = await import("fs");
+    const audioBuffer = readFileSync(outputPath);
+
+    spinner.succeed("Clipchamp voice audio generated!");
+
+    writeFile("./output/audio/narration-meta.json", JSON.stringify({
+      provider: "clipchamp", engine: useAzure ? "azure-speech" : "edge-tts",
+      voiceName, speedMultiplier,
+      textLength: text.length, fileSizeMB: (audioBuffer.length / (1024 * 1024)).toFixed(2),
+      generatedAt: new Date().toISOString(),
+    }, null, 2));
+
+    saveState({ step5: { completed: true, audioPath: outputPath, provider: "clipchamp" } });
+    logger.success(`Audio saved → ${outputPath}`);
+    logger.info(`File size: ${(audioBuffer.length / (1024 * 1024)).toFixed(2)} MB`);
+
+    return { audioPath: outputPath, buffer: audioBuffer };
+  } catch (err) {
+    spinner.fail("Clipchamp voice failed");
     throw err;
   }
 }

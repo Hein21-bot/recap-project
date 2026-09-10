@@ -67,7 +67,8 @@ app.post("/api/reset", async (req, res) => {
   }
   ["./output/script.json", "./output/script-raw.txt", "./output/script-formatted.json",
     "./output/tts-input.txt", "./output/pipeline-state.json",
-    "./output/sentence-durations.json"].forEach(f => {
+    "./output/sentence-durations.json", "./output/subtitle-region.json",
+    "./output/frame-preview.jpg"].forEach(f => {
       if (fs.existsSync(f)) fs.rmSync(f);
     });
   if (fs.existsSync("./input/video.mp4")) fs.rmSync("./input/video.mp4");
@@ -254,23 +255,29 @@ app.post("/api/step/4/format-sync", async (req, res) => {
 
 // ── Step 5: Generate audio ────────────────────────────────────────────────────
 app.post("/api/step/5/generate", async (req, res) => {
-  const { jobId, sessionId } = req.body;
-  console.log("[Step 5] Route hit — jobId:", jobId, "sessionId:", sessionId);
+  const { jobId, sessionId, provider } = req.body;
+  const ttsProvider = (provider || "gemini").toLowerCase();
+  console.log("[Step 5] Route hit — jobId:", jobId, "sessionId:", sessionId, "provider:", ttsProvider);
   res.json({ started: true });
   console.log("[Step 5] Response sent, starting audio generation...");
 
   try {
     console.log("[Step 5] Entering try block...");
-    emit(jobId, "log", { message: "Gemini TTS ဖြင့် အသံဖိုင် ထုတ်နေသည်..." });
+    emit(jobId, "log", {
+      message: ttsProvider === "clipchamp"
+        ? "Clipchamp (Edge neural voice) ဖြင့် အသံဖိုင် ထုတ်နေသည်..."
+        : "Gemini TTS ဖြင့် အသံဖိုင် ထုတ်နေသည်...",
+    });
     console.log("[Step 5] Loading session...");
     const state = await getSession(sessionId);
     console.log("[Step 5] Calling step5GenerateAudio...");
     const { audioPath } = await step5GenerateAudio({
+      provider: ttsProvider,
       voiceKey: state.step2?.voiceKey || "sadaltager",
       speedMultiplier: state.step3?.tone?.speedMultiplier || 1.3,
     });
     console.log("[Step 5] Saving session...");
-    await saveSession(sessionId, { step5: { completed: true, audioPath } });
+    await saveSession(sessionId, { step5: { completed: true, audioPath, provider: ttsProvider } });
     console.log("[Step 5] SUCCESS — audioPath:", audioPath);
     emit(jobId, "done", { success: true, audioPath });
   } catch (err) {
@@ -306,6 +313,48 @@ app.post("/api/step/6/sync", async (req, res) => {
   }
 });
 
+// ── Subtitle box: preview frame + manual region ──────────────────────────────
+const FFMPEG_BIN = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
+const REGION_FILE = "./output/subtitle-region.json";
+
+// Grab a single frame from the downloaded video for the box-drawing UI.
+app.get("/api/step/frame", async (req, res) => {
+  const t = Math.max(0, parseFloat(req.query.t) || 3);
+  const inputVideo = path.join(__dirname, "input", "video.mp4");
+  if (!fs.existsSync(inputVideo)) return res.status(404).json({ error: "No video downloaded yet" });
+
+  const framePath = path.join(__dirname, "output", "frame-preview.jpg");
+  try {
+    const { execFileSync } = await import("child_process");
+    execFileSync(FFMPEG_BIN, [
+      "-ss", String(t), "-i", inputVideo,
+      "-frames:v", "1", "-q:v", "3", "-y", framePath,
+    ], { stdio: "pipe" });
+    res.sendFile(framePath);
+  } catch (err) {
+    console.error("[Frame] ERROR:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Read / write the manual subtitle box (normalized {x,y,w,h} in 0..1, or null).
+app.get("/api/step/7/region", async (req, res) => {
+  const sessionId = req.query.sessionId || "default";
+  const state = await getSession(sessionId);
+  res.json({ region: state.subtitleRegion || null });
+});
+
+app.post("/api/step/7/region", async (req, res) => {
+  const { sessionId, region } = req.body;
+  const clean = region && ["x", "y", "w", "h"].every((k) => typeof region[k] === "number")
+    ? { x: region.x, y: region.y, w: region.w, h: region.h }
+    : null;
+  await saveSession(sessionId, { subtitleRegion: clean });
+  fs.writeFileSync(REGION_FILE, JSON.stringify({ region: clean }, null, 2));
+  console.log("[Region] saved:", JSON.stringify(clean));
+  res.json({ success: true, region: clean });
+});
+
 // ── Step 7: Subtitles ─────────────────────────────────────────────────────────
 app.post("/api/step/7/subtitles", async (req, res) => {
   const { jobId, sessionId } = req.body;
@@ -322,6 +371,7 @@ app.post("/api/step/7/subtitles", async (req, res) => {
     const result = await step7AddSubtitles({
       videoPath: state.step6?.syncedVideoPath || "./output/video/synced-video.mp4",
       audioPath: state.step5?.audioPath || "./output/audio/narration.wav",
+      subtitleRegion: state.subtitleRegion || null,
     });
     console.log("[Step 7] Saving session...");
     await saveSession(sessionId, { step7: { completed: true, subtitledVideoPath: result.outputPath, ...result } });

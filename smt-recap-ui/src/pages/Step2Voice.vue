@@ -20,6 +20,21 @@
       </button>
     </div>
 
+    <p class="text-sm text-gray-400 mb-2">Voice engine</p>
+    <div class="grid grid-cols-2 gap-3 mb-8">
+      <button
+        v-for="e in engines" :key="e.key"
+        @click="engine = e.key"
+        class="text-left p-3 rounded-xl border-2 transition-all"
+        :class="engine === e.key
+          ? 'border-sky-500 bg-sky-500/10'
+          : 'border-gray-800 bg-gray-900 hover:border-gray-700'"
+      >
+        <span class="block font-semibold text-sm">{{ e.name }}</span>
+        <span class="block text-xs text-gray-500 mt-0.5">{{ e.desc }}</span>
+      </button>
+    </div>
+
     <p v-if="error" class="text-red-400 text-sm mb-4">{{ error }}</p>
 
     <button @click="confirm" :disabled="saving"
@@ -42,6 +57,7 @@ import { usePipelineStore } from "@/stores/pipeline.js";
 const store    = usePipelineStore();
 const router   = useRouter();
 const selected = ref("sadaltager");
+const engine   = ref(localStorage.getItem("smt_tts_provider") || "gemini");
 const saving   = ref(false);
 const error    = ref("");
 
@@ -50,6 +66,11 @@ const voices = [
   { key: "energetic",   emoji: "⚡", name: "Adam (Energetic)", desc: "အသံကြက်သီး လူငယ်ဆန် — Funny / Energetic" },
   { key: "documentary", emoji: "🎬", name: "Arnold (Doc)",     desc: "အသံနက် Documentary — Sad / Serious" },
   { key: "youthful",    emoji: "✨", name: "Gigi (Youthful)",  desc: "လူငယ်ဆန်သော — Entertainment" },
+];
+
+const engines = [
+  { key: "gemini",    name: "Gemini TTS", desc: "မြန်ဆန် — default" },
+  { key: "clipchamp", name: "Clipchamp",  desc: "Edge neural (Giuseppe/Thiha) — key မလို" },
 ];
 
 onMounted(async () => {
@@ -61,6 +82,7 @@ async function confirm() {
   saving.value = true;
   error.value  = "";
   try {
+    localStorage.setItem("smt_tts_provider", engine.value);
     await api.selectVoice(selected.value);
     store.loadState();
     router.push("/step/3");

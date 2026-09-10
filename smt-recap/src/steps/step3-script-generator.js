@@ -204,11 +204,17 @@ ${tone.style}
 `;
 }
 
-// Available models for this API key
+// Model fallback chain. "*-latest" aliases track Google's current release so
+// new API keys (which can't call retired names like gemini-2.5-flash) keep working.
+// Override with GEMINI_TEXT_MODEL in .env.
 const MODELS = [
+  process.env.GEMINI_TEXT_MODEL,
+  "gemini-flash-latest",
+  "gemini-3.5-flash",
   "gemini-2.5-flash",
+  "gemini-pro-latest",
   "gemini-2.5-pro",
-];
+].filter(Boolean);
 
 async function callGeminiWithRetry(genAI, buildPrompt, spinner, maxRetries = 3) {
   for (const modelName of MODELS) {
@@ -220,23 +226,31 @@ async function callGeminiWithRetry(genAI, buildPrompt, spinner, maxRetries = 3) 
         spinner.text = "Processing response...";
         return response.response.text();
       } catch (err) {
-        const is429 = err.message?.includes("429") || err.message?.includes("quota");
-        const retryMatch = err.message?.match(/retry[^0-9]*(\d+)s/i);
-        const waitSec = retryMatch ? parseInt(retryMatch[1]) + 2 : 15;
+        const msg = err.message || "";
+        const is429 = msg.includes("429") || msg.includes("quota");
+        // 503/500/502 "high demand" / "overloaded" / UNAVAILABLE — transient
+        const isTransient = /\b(503|500|502)\b/.test(msg)
+          || /high demand|overloaded|unavailable|try again later/i.test(msg);
+        // 404 / retired model name → skip straight to the next model in the chain
+        const isModelGone = /\b404\b/.test(msg) || /not found|no longer available|not supported/i.test(msg);
+        if (isModelGone) break;
+        const retryMatch = msg.match(/retry[^0-9]*(\d+)s/i);
+        const waitSec = retryMatch ? parseInt(retryMatch[1]) + 2 : (isTransient ? 8 : 15);
 
-        if (is429 && attempt < maxRetries) {
-          spinner.text = `Rate limited on ${modelName}. Waiting ${waitSec}s...`;
+        if ((is429 || isTransient) && attempt < maxRetries) {
+          spinner.text = `${isTransient ? "Model busy" : "Rate limited"} on ${modelName}. Waiting ${waitSec}s...`;
           await new Promise((r) => setTimeout(r, waitSec * 1000));
           continue;
         }
-        if (is429) break; // exhausted retries for this model → try next
-        throw err;        // non-quota error → rethrow immediately
+        if (is429 || isTransient) break; // exhausted retries for this model → try next
+        throw err;                       // real error → rethrow immediately
       }
     }
   }
   throw new Error(
-    "All Gemini models quota exhausted.\n" +
-    "→ Enable billing at https://aistudio.google.com or wait for quota reset."
+    "All Gemini models unavailable (quota exhausted or overloaded).\n" +
+    "→ Wait a minute and retry, enable billing at https://aistudio.google.com, " +
+    "or set GEMINI_TEXT_MODEL in .env to a specific model."
   );
 }
 

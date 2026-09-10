@@ -45,6 +45,7 @@ const steps = [
   { n: 2,    path: "/step/2",    label: "Select Voice"    },
   { n: 3,    path: "/step/3",    label: "Set Tone"        },
   { n: 1,    path: "/step/1",    label: "Generate Script" },
+  { n: null, path: "/subtitle-position", label: "Subtitle Box" },
   { n: null, path: "/processing",label: "Processing"      },
   { n: 8,    path: "/step/8",    label: "Export"          },
 ];

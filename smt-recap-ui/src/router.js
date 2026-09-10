@@ -11,6 +11,7 @@ const routes = [
   { path: "/step/6",  component: () => import("./pages/Step6Sync.vue") },
   { path: "/step/7",  component: () => import("./pages/Step7Subtitles.vue") },
   { path: "/step/8",  component: () => import("./pages/Step8Export.vue") },
+  { path: "/subtitle-position", component: () => import("./pages/SubtitlePosition.vue") },
   { path: "/processing", component: () => import("./pages/StepProcessing.vue") },
 ];
 

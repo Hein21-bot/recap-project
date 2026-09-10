@@ -67,6 +67,11 @@ function formatScript(text, tone) {
 
   let formatted = text;
 
+  // Step 0: Micro-pauses after numbers (timestamps, statistics) — done FIRST,
+  // before any [pauseN] markers exist, so the digit inside a marker like
+  // [pause3] never gets an "..." appended (which broke the TTS marker stripper).
+  formatted = formatted.replace(/(\d+(?:\.\d+)?)/g, "$1...");
+
   // Step 1: Add pauses after Myanmar sentence endings
   const pauseAfterPeriod = getPauseDuration(tone.pauseDuration, "after_period");
   const pauseAfterComma = getPauseDuration(tone.pauseDuration, "after_comma");
@@ -87,9 +92,6 @@ function formatScript(text, tone) {
       );
     }
   });
-
-  // Step 3: Add micro-pauses after numbers (timestamps, statistics)
-  formatted = formatted.replace(/(\d+(?:\.\d+)?)/g, "$1...");
 
   // Step 4: Add breath pause before key section transitions
   if (tone.emphasisStyle === "dramatic") {
@@ -137,14 +139,21 @@ function getPauseDuration(pauseType, position) {
   return (pauseMap[pauseType] || pauseMap.medium)[position];
 }
 
-// Strip pause markers for clean TTS input (ElevenLabs handles timing differently)
+// Strip formatting markers so the TTS engine never speaks them aloud.
+// (Gemini / Azure read a comma as a short pause.) Tolerant of corrupted
+// markers like "[pause3...]" and any stray "[tag]" left in the text.
 export function stripPauseMarkersForElevenLabs(text) {
   return text
-    .replace(/\[pause3\]/g, " , ")  // ElevenLabs reads commas as pauses
-    .replace(/\[pause2\]/g, " , ")
-    .replace(/\[pause\]/g, " ")
-    .replace(/\[slow\]/g, "")
-    .replace(/\[\/slow\]/g, "")
-    .replace(/\.\.\./g, " , ")
+    // [pause], [pause2], [pause3], and corrupted forms like [pause3...] → comma
+    .replace(/\[\s*pause[0-9]*[^\]]*\]/gi, " , ")
+    // [slow] / [/slow] style tags → nothing
+    .replace(/\[\s*\/?\s*slow\s*\]/gi, " ")
+    // any other short leftover [bracket tag] → space
+    .replace(/\[[^\]\n]{0,40}\]/g, " ")
+    // ellipsis (micro-pause) → comma
+    .replace(/\.{2,}/g, " , ")
+    // tidy: collapse runs of commas and spaces
+    .replace(/(?:\s*,\s*){2,}/g, " , ")
+    .replace(/\s{2,}/g, " ")
     .trim();
 }

@@ -61,10 +61,22 @@ export async function step7AddSubtitles(options = {}) {
   const videoDims = getVideoDimensions(videoPath);
   logger.info(`Video dimensions: ${videoDims.w}x${videoDims.h}`);
 
+  // Manual subtitle box: normalized {x,y,w,h} in 0..1, from the UI. When set,
+  // the box region is blurred for the whole video and subtitles sit inside it.
+  const normRegion = options.subtitleRegion
+    || readJSON("./output/subtitle-region.json")?.region
+    || null;
+  const region = normRegion ? toPixelRegion(normRegion, videoDims) : null;
+  if (region) {
+    logger.info(`Subtitle box: ${region.w}x${region.h} at (${region.x}, ${region.y}) — blur on`);
+  } else {
+    logger.info("No subtitle box — auto position, no blur");
+  }
+
   // Embed subtitles into video
   const outputPath = "./output/video/subtitled-video.mp4";
 
-  await burnSubtitles(videoPath, srtPath, outputPath, videoDims);
+  await burnSubtitles(videoPath, srtPath, outputPath, videoDims, region);
 
   saveState({ step7: { completed: true, srtPath, assPath, subtitledVideoPath: outputPath } });
   logger.success(`Subtitled video → ${outputPath}`);
@@ -366,6 +378,20 @@ function escapeDrawtext(text) {
     .replace(/:/g, "\\:");
 }
 
+// Normalized box {x,y,w,h} in 0..1 → integer pixel rect, clamped to the frame,
+// with even x/y/w/h (libx264 yuv420p needs even crop offsets and sizes).
+function toPixelRegion(norm, dims) {
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  let w = even(norm.w * dims.w);
+  let h = even(norm.h * dims.h);
+  let x = even(norm.x * dims.w);
+  let y = even(norm.y * dims.h);
+  if (x + w > dims.w) x = even(dims.w - w);
+  if (y + h > dims.h) y = even(dims.h - h);
+  x = Math.max(0, x); y = Math.max(0, y);
+  return { x, y, w, h };
+}
+
 function getVideoDimensions(videoPath) {
   const { execFileSync } = require("child_process");
   const FFPROBE = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffprobe";
@@ -384,7 +410,7 @@ function getVideoDimensions(videoPath) {
 }
 
 
-function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h: 1920 }) {
+function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h: 1920 }, region = null) {
   return new Promise((resolve, reject) => {
     const spinner = ora("Rendering subtitles with Pango/HarfBuzz...").start();
 
@@ -420,12 +446,16 @@ function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h:
 
       const fontSize = 14;
       const videoWidth = videoDims?.w || 608;
+      // Wrap text to the box width (with padding) when a box is set, else default band.
+      const wrapWidth = region
+        ? Math.max(80, Math.floor(region.w * 0.90))
+        : Math.floor(videoWidth * 0.80 * 0.75);
       execFileSync(PANGO, [
         `--font=Noto Sans Myanmar Bold ${fontSize}`,
         "--background=transparent",
         "--foreground=#FFD700",
         "--align=center",
-        `--width=${Math.floor(videoWidth * 0.80 * 0.75)}`,
+        `--width=${wrapWidth}`,
         "--wrap=word",
         "-qo", rawPng,
         textFile,
@@ -456,8 +486,19 @@ function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h:
       pngPaths.push(finalPng);
     }
 
-    spinner.text = "Overlaying Myanmar subtitles...";
-    runPass2(FFMPEG_BIN, videoPath, entries, pngPaths, outputPath, spinner)
+    const run = async () => {
+      let subInput = videoPath;
+      if (region) {
+        spinner.text = "Blurring subtitle box...";
+        const blurredPath = outputPath.replace(/\.mp4$/i, "_blurred.mp4");
+        await runPass1(FFMPEG_BIN, videoPath, region, blurredPath);
+        subInput = blurredPath;
+      }
+      spinner.text = "Overlaying Myanmar subtitles...";
+      await runPass2(FFMPEG_BIN, subInput, entries, pngPaths, outputPath, spinner, region);
+    };
+
+    run()
       .then(() => {
         spinner.succeed("Subtitles burned (Pango/HarfBuzz)");
         resolve();
@@ -470,44 +511,32 @@ function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h:
   });
 }
 
-function runPass1(ffmpegBin, videoPath, blurRanges, outputPath) {
+// Pass 1: blur one rectangular region for the whole video (subtitle backdrop).
+const BLUR_SIGMA = Number(process.env.SUBTITLE_BLUR_SIGMA) || 25;
+
+function runPass1(ffmpegBin, videoPath, region, outputPath) {
   return new Promise((resolve, reject) => {
     const { spawn } = require("child_process");
 
-    if (blurRanges.length === 0) {
-      console.warn("[Step 7 Pass1] No blur ranges — copying video without blur");
+    if (!region) {
       const { execFileSync } = require("child_process");
       execFileSync("cp", [videoPath, outputPath]);
       return resolve();
     }
-    console.log("[Step 7 Pass1] Applying blur to", blurRanges.length, "region(s):", JSON.stringify(blurRanges));
 
-    // Build blur-only filter_complex
-    let filterComplex = "";
-    let prevLabel = "0:v";
+    const { x, y, w, h } = region;
+    console.log(`[Step 7 Pass1] Blur box ${w}x${h} @ (${x},${y}) sigma=${BLUR_SIGMA}`);
 
-    for (let i = 0; i < blurRanges.length; i++) {
-      const r = blurRanges[i];
-      const baseA = `ba${i}`;
-      const baseB = `bb${i}`;
-      const blurLabel = `blur${i}`;
-      const outLabel = i < blurRanges.length - 1 ? `bv${i}` : "vout";
-
-      filterComplex +=
-        `[${prevLabel}]split[${baseA}][${baseB}];` +
-        `[${baseA}]crop=${r.w}:${r.h}:${r.x}:${r.y},gblur=sigma=40[${blurLabel}];` +
-        `[${baseB}][${blurLabel}]overlay=${r.x}:${r.y}` +
-        `:enable='between(t,${r.startT.toFixed(3)},${r.endT.toFixed(3)})'[${outLabel}]`;
-
-      if (i < blurRanges.length - 1) filterComplex += ";";
-      prevLabel = outLabel;
-    }
+    const filterComplex =
+      `[0:v]split[ba][bb];` +
+      `[ba]crop=${w}:${h}:${x}:${y},gblur=sigma=${BLUR_SIGMA}[blur];` +
+      `[bb][blur]overlay=${x}:${y}[vout]`;
 
     const args = [
       "-i", videoPath,
       "-filter_complex", filterComplex,
       "-map", "[vout]",
-      "-map", "0:a",
+      "-map", "0:a?",
       "-c:a", "copy",
       "-c:v", "libx264",
       "-crf", "18",
@@ -527,7 +556,7 @@ function runPass1(ffmpegBin, videoPath, blurRanges, outputPath) {
   });
 }
 
-function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner) {
+function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner, region = null) {
   return new Promise((resolve, reject) => {
     const { spawn } = require("child_process");
 
@@ -540,6 +569,12 @@ function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner) 
     const inputs = [];
     for (const p of pngPaths) inputs.push("-i", p);
 
+    // Position the subtitle PNG: centered inside the box when set, else the
+    // default lower band. `w`/`h` are the overlay (PNG) dimensions.
+    const pos = region
+      ? `x=${region.x}+(${region.w}-w)/2:y=${region.y}+(${region.h}-h)/2`
+      : `x=(W-w)/2:y=H*0.70-h`;
+
     let filterComplex = "";
     let prevLabel = "0:v";
 
@@ -547,7 +582,7 @@ function runPass2(ffmpegBin, videoPath, entries, pngPaths, outputPath, spinner) 
       const e = entries[i];
       const outLabel = i < entries.length - 1 ? `mv${i}` : "vout";
       filterComplex +=
-        `[${prevLabel}][${i + 1}:v]overlay=x=(W-w)/2:y=H*0.70-h` +
+        `[${prevLabel}][${i + 1}:v]overlay=${pos}` +
         `:enable='between(t,${e.start},${e.end})'[${outLabel}]`;
       if (i < entries.length - 1) filterComplex += ";";
       prevLabel = outLabel;

@@ -39,9 +39,9 @@
     </div>
 
     <div v-if="done" class="mt-6 text-right">
-      <router-link to="/processing"
+      <router-link to="/subtitle-position"
         class="inline-block px-6 py-2.5 bg-sky-600 hover:bg-sky-500 rounded-xl text-sm font-medium transition-colors">
-        Next: Auto Process →
+        Next: Subtitle Box →
       </router-link>
     </div>
   </div>

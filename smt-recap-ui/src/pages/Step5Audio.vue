@@ -5,7 +5,24 @@
 
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6 text-sm text-gray-400">
       ℹ️ ဤ audio သည် original video ၏ အသံ <strong class="text-white">မဟုတ်ပါ</strong> —
-      Step 1 မှ script ကို Gemini AI voice ဖြင့် ဖတ်ထားသော Myanmar narration ဖြစ်သည်။
+      Step 1 မှ script ကို AI voice ဖြင့် ဖတ်ထားသော Myanmar narration ဖြစ်သည်။
+    </div>
+
+    <!-- TTS provider selector -->
+    <div class="mb-4">
+      <p class="text-sm text-gray-400 mb-2">Voice engine ရွေးပါ</p>
+      <div class="grid grid-cols-2 gap-3">
+        <button
+          v-for="opt in providers" :key="opt.value"
+          @click="provider = opt.value" :disabled="running"
+          class="rounded-xl border px-4 py-3 text-left transition-colors"
+          :class="provider === opt.value
+            ? 'border-sky-500 bg-sky-600/10'
+            : 'border-gray-800 bg-gray-900 hover:border-gray-700'">
+          <span class="block text-sm font-medium text-white">{{ opt.label }}</span>
+          <span class="block text-xs text-gray-500 mt-0.5">{{ opt.hint }}</span>
+        </button>
+      </div>
     </div>
 
     <button @click="run" :disabled="running"
@@ -47,6 +64,12 @@ import LogStream from "@/components/LogStream.vue";
 const store     = usePipelineStore();
 const { logs, done, result, connect, startPolling } = useSSE();
 const running    = ref(false);
+const provider   = ref(localStorage.getItem("smt_tts_provider") || "gemini");
+watch(provider, (v) => localStorage.setItem("smt_tts_provider", v));
+const providers  = [
+  { value: "gemini",    label: "Gemini TTS",  hint: "မြန်ဆန် — default" },
+  { value: "clipchamp", label: "Clipchamp",   hint: "Edge neural (Thiha/Nilar/Multilingual) — key မလို" },
+];
 const audioSrc   = ref("/output/audio/narration.wav");
 const audioKey   = ref(0);
 const audioReady = ref(false);
@@ -82,7 +105,7 @@ async function run() {
   error.value      = "";
   const jobId = makeJobId();
   connect(jobId);
-  await api.generateAudio(jobId);
+  await api.generateAudio(jobId, provider.value);
 
   startPolling(async () => {
     const s = await api.getState();

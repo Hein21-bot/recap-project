@@ -137,7 +137,8 @@ async function runAll() {
       setStatus("step5", "done");
     } else {
       setStatus("step5", "running");
-      await api.generateAudio(makeJobId());
+      const provider = localStorage.getItem("smt_tts_provider") || "gemini";
+      await api.generateAudio(makeJobId(), provider);
       await pollUntilDone("step5");
       setStatus("step5", "done");
     }
