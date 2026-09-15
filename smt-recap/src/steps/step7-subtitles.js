@@ -73,10 +73,24 @@ export async function step7AddSubtitles(options = {}) {
     logger.info("No subtitle box — auto position, no blur");
   }
 
+  // Extra blur-only boxes (e.g. to hide a baked-in watermark/logo in the
+  // source footage). Same blur strength as the subtitle box, no text in them.
+  const normBlurRegions = options.blurRegions
+    || readJSON("./output/blur-regions.json")?.regions
+    || [];
+  const blurOnlyRegions = normBlurRegions.map((r) => toPixelRegion(r, videoDims));
+  if (blurOnlyRegions.length) {
+    logger.info(`${blurOnlyRegions.length} extra blur box(es): ${JSON.stringify(blurOnlyRegions)}`);
+  }
+
+  // All boxes that need blurring in Pass 1 (subtitle box + blur-only boxes).
+  // Only the subtitle box gets text placed inside it (Pass 2).
+  const allBlurBoxes = [...blurOnlyRegions, ...(region ? [region] : [])];
+
   // Embed subtitles into video
   const outputPath = "./output/video/subtitled-video.mp4";
 
-  await burnSubtitles(videoPath, srtPath, outputPath, videoDims, region);
+  await burnSubtitles(videoPath, srtPath, outputPath, videoDims, region, allBlurBoxes);
 
   saveState({ step7: { completed: true, srtPath, assPath, subtitledVideoPath: outputPath } });
   logger.success(`Subtitled video → ${outputPath}`);
@@ -410,7 +424,7 @@ function getVideoDimensions(videoPath) {
 }
 
 
-function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h: 1920 }, region = null) {
+function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h: 1920 }, region = null, blurBoxes = []) {
   return new Promise((resolve, reject) => {
     const spinner = ora("Rendering subtitles with Pango/HarfBuzz...").start();
 
@@ -488,10 +502,10 @@ function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h:
 
     const run = async () => {
       let subInput = videoPath;
-      if (region) {
-        spinner.text = "Blurring subtitle box...";
+      if (blurBoxes.length) {
+        spinner.text = `Blurring ${blurBoxes.length} box(es)...`;
         const blurredPath = outputPath.replace(/\.mp4$/i, "_blurred.mp4");
-        await runPass1(FFMPEG_BIN, videoPath, region, blurredPath);
+        await runPass1(FFMPEG_BIN, videoPath, blurBoxes, blurredPath);
         subInput = blurredPath;
       }
       spinner.text = "Overlaying Myanmar subtitles...";
@@ -511,26 +525,34 @@ function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h:
   });
 }
 
-// Pass 1: blur one rectangular region for the whole video (subtitle backdrop).
+// Pass 1: blur one or more rectangular regions for the whole video
+// (subtitle backdrop + any extra boxes hiding a source watermark/logo).
 const BLUR_SIGMA = Number(process.env.SUBTITLE_BLUR_SIGMA) || 25;
 
-function runPass1(ffmpegBin, videoPath, region, outputPath) {
+function runPass1(ffmpegBin, videoPath, regions, outputPath) {
   return new Promise((resolve, reject) => {
     const { spawn } = require("child_process");
 
-    if (!region) {
+    if (!regions || regions.length === 0) {
       const { execFileSync } = require("child_process");
       execFileSync("cp", [videoPath, outputPath]);
       return resolve();
     }
 
-    const { x, y, w, h } = region;
-    console.log(`[Step 7 Pass1] Blur box ${w}x${h} @ (${x},${y}) sigma=${BLUR_SIGMA}`);
+    console.log(`[Step 7 Pass1] Blurring ${regions.length} box(es), sigma=${BLUR_SIGMA}:`, JSON.stringify(regions));
 
-    const filterComplex =
-      `[0:v]split[ba][bb];` +
-      `[ba]crop=${w}:${h}:${x}:${y},gblur=sigma=${BLUR_SIGMA}[blur];` +
-      `[bb][blur]overlay=${x}:${y}[vout]`;
+    let filterComplex = "";
+    let prevLabel = "0:v";
+    for (let i = 0; i < regions.length; i++) {
+      const { x, y, w, h } = regions[i];
+      const outLabel = i < regions.length - 1 ? `bv${i}` : "vout";
+      filterComplex +=
+        `[${prevLabel}]split[ba${i}][bb${i}];` +
+        `[ba${i}]crop=${w}:${h}:${x}:${y},gblur=sigma=${BLUR_SIGMA}[blur${i}];` +
+        `[bb${i}][blur${i}]overlay=${x}:${y}[${outLabel}]`;
+      if (i < regions.length - 1) filterComplex += ";";
+      prevLabel = outLabel;
+    }
 
     const args = [
       "-i", videoPath,

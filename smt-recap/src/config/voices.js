@@ -55,7 +55,7 @@ export const TONES = {
   knowledge: {
     name: "Knowledge Sharing",
     description: "အသိပညာမျှဝေ - အေးဆေးတည်ငြိမ်",
-    speedMultiplier: 1.3,
+    speedMultiplier: 1.2,
     pauseDuration: "long",    // Longer pauses between sentences
     emphasisStyle: "subtle",
     voiceRecommendation: "sadaltager",

@@ -12,6 +12,8 @@ const routes = [
   { path: "/step/7",  component: () => import("./pages/Step7Subtitles.vue") },
   { path: "/step/8",  component: () => import("./pages/Step8Export.vue") },
   { path: "/subtitle-position", component: () => import("./pages/SubtitlePosition.vue") },
+  { path: "/blur-box", component: () => import("./pages/BlurBox.vue") },
+  { path: "/watermark", component: () => import("./pages/WatermarkPicker.vue") },
   { path: "/processing", component: () => import("./pages/StepProcessing.vue") },
 ];
 

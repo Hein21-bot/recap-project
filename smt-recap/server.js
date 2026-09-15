@@ -30,6 +30,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use("/output", express.static(path.join(__dirname, "output")));
+app.use("/assets", express.static(path.join(__dirname, "assets")));
 
 // ── SSE: real-time logs for long-running steps ────────────────────────────────
 const clients = new Map();
@@ -68,7 +69,7 @@ app.post("/api/reset", async (req, res) => {
   ["./output/script.json", "./output/script-raw.txt", "./output/script-formatted.json",
     "./output/tts-input.txt", "./output/pipeline-state.json",
     "./output/sentence-durations.json", "./output/subtitle-region.json",
-    "./output/frame-preview.jpg"].forEach(f => {
+    "./output/blur-regions.json", "./output/frame-preview.jpg"].forEach(f => {
       if (fs.existsSync(f)) fs.rmSync(f);
     });
   if (fs.existsSync("./input/video.mp4")) fs.rmSync("./input/video.mp4");
@@ -355,6 +356,66 @@ app.post("/api/step/7/region", async (req, res) => {
   res.json({ success: true, region: clean });
 });
 
+// ── Blur-only boxes (e.g. to hide a source watermark/logo) — array of regions ─
+const BLUR_REGIONS_FILE = "./output/blur-regions.json";
+
+app.get("/api/step/7/blur-regions", async (req, res) => {
+  const sessionId = req.query.sessionId || "default";
+  const state = await getSession(sessionId);
+  res.json({ regions: state.blurRegions || [] });
+});
+
+app.post("/api/step/7/blur-regions", async (req, res) => {
+  const { sessionId, regions } = req.body;
+  const clean = Array.isArray(regions)
+    ? regions.filter((r) => r && ["x", "y", "w", "h"].every((k) => typeof r[k] === "number"))
+        .map((r) => ({ x: r.x, y: r.y, w: r.w, h: r.h }))
+    : [];
+  await saveSession(sessionId, { blurRegions: clean });
+  fs.writeFileSync(BLUR_REGIONS_FILE, JSON.stringify({ regions: clean }, null, 2));
+  console.log("[BlurRegions] saved:", clean.length, "box(es)");
+  res.json({ success: true, regions: clean });
+});
+
+// ── Watermark image + corner position picker (choose among ./assets/*) ───────
+const WATERMARK_CHOICES = ["watermark.png", "inventory.JPG", "inventory-2.PNG", "movie.JPG"];
+const WATERMARK_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"];
+
+app.get("/api/assets", (req, res) => {
+  res.json({
+    images: WATERMARK_CHOICES.filter((f) => fs.existsSync(path.join(__dirname, "assets", f))),
+  });
+});
+
+app.get("/api/step/8/watermark", async (req, res) => {
+  const sessionId = req.query.sessionId || "default";
+  const state = await getSession(sessionId);
+  res.json({
+    image: state.watermarkImage || "watermark.png",
+    position: state.watermarkPosition || "top-right",
+    sizePct: state.watermarkSizePct || 16,
+    paddingPct: state.watermarkPaddingPct ?? 2,
+  });
+});
+
+app.post("/api/step/8/watermark", async (req, res) => {
+  const { sessionId, image, position, sizePct, paddingPct } = req.body;
+  const cleanImage = WATERMARK_CHOICES.includes(image) ? image : "watermark.png";
+  const cleanPosition = WATERMARK_POSITIONS.includes(position) ? position : "top-right";
+  const n = Number(sizePct);
+  const cleanSizePct = Number.isFinite(n) ? Math.min(40, Math.max(4, n)) : 16;
+  const p = Number(paddingPct);
+  const cleanPaddingPct = Number.isFinite(p) ? Math.min(10, Math.max(0, p)) : 2;
+  await saveSession(sessionId, {
+    watermarkImage: cleanImage,
+    watermarkPosition: cleanPosition,
+    watermarkSizePct: cleanSizePct,
+    watermarkPaddingPct: cleanPaddingPct,
+  });
+  console.log("[Watermark] saved:", cleanImage, cleanPosition, cleanSizePct + "%", "padding:" + cleanPaddingPct + "%");
+  res.json({ success: true, image: cleanImage, position: cleanPosition, sizePct: cleanSizePct, paddingPct: cleanPaddingPct });
+});
+
 // ── Step 7: Subtitles ─────────────────────────────────────────────────────────
 app.post("/api/step/7/subtitles", async (req, res) => {
   const { jobId, sessionId } = req.body;
@@ -372,6 +433,7 @@ app.post("/api/step/7/subtitles", async (req, res) => {
       videoPath: state.step6?.syncedVideoPath || "./output/video/synced-video.mp4",
       audioPath: state.step5?.audioPath || "./output/audio/narration.wav",
       subtitleRegion: state.subtitleRegion || null,
+      blurRegions: state.blurRegions || [],
     });
     console.log("[Step 7] Saving session...");
     await saveSession(sessionId, { step7: { completed: true, subtitledVideoPath: result.outputPath, ...result } });
@@ -397,16 +459,20 @@ app.post("/api/step/8/export", async (req, res) => {
     console.log("[Step 8] Loading session...");
     const state = await getSession(sessionId);
     console.log("[Step 8] Calling step8Export — resolution:", resolution || "1080p");
-    const { outputPath, fileSize } = await step8Export({
+    const { outputPath, fileSize, resolutionCapped } = await step8Export({
       resolution: resolution || "1080p",
       watermark: watermark || "",
       thumbnailText: thumbnailText || "",
       inputPath: state.step7?.subtitledVideoPath || "./output/video/subtitled-video.mp4",
+      watermarkImage: state.watermarkImage || "watermark.png",
+      watermarkPosition: state.watermarkPosition || "top-right",
+      watermarkSizePct: state.watermarkSizePct || 16,
+      watermarkPaddingPct: state.watermarkPaddingPct ?? 2,
     });
     console.log("[Step 8] Saving session...");
-    await saveSession(sessionId, { step8: { completed: true, exportPath: outputPath, fileSize } });
-    console.log("[Step 8] SUCCESS — outputPath:", outputPath, "size:", fileSize);
-    emit(jobId, "done", { success: true, outputPath, fileSize });
+    await saveSession(sessionId, { step8: { completed: true, exportPath: outputPath, fileSize, resolutionCapped } });
+    console.log("[Step 8] SUCCESS — outputPath:", outputPath, "size:", fileSize, "capped:", resolutionCapped);
+    emit(jobId, "done", { success: true, outputPath, fileSize, resolutionCapped });
   } catch (err) {
     console.error("[Step 8] ERROR:", err.stack || err.message);
     emit(jobId, "done", { success: false, error: err.message });

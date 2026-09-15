@@ -106,18 +106,25 @@ function mergeAudioVideo(videoPath, audioPath, outputPath, speed = 1.0) {
   });
 }
 
-function slowMotionSync(videoPath, audioPath, outputPath, slowFactor) {
+async function slowMotionSync(videoPath, audioPath, outputPath, slowFactor) {
+  const sourceFps = Math.min(await getVideoFps(videoPath), 30); // cap target fps — no visual benefit above 30 here, just more work
   return new Promise((resolve, reject) => {
     const spinner = ora(`Applying slow motion (${slowFactor.toFixed(2)}x)...`).start();
 
-    // PTS setpts slows video: setpts=2.0*PTS means 2x slower
+    // PTS setpts stretches time (2.0*PTS = 2x slower) but doesn't create new
+    // frames, so it just holds each existing frame longer → visible judder.
+    // minterpolate fills in frames so it plays smoothly. mi_mode=mci (true
+    // motion-compensated interpolation) was tried first but mc_mode=aobmc +
+    // me_mode=bidir is extremely slow — 20+ minutes and still not done on a
+    // 1080p clip. mi_mode=blend just cross-fades between frames: far cheaper,
+    // and still much smoother than plain setpts judder.
     const ptsMultiplier = slowFactor.toFixed(4);
 
     ffmpeg()
       .input(videoPath)
       .input(audioPath)
       .complexFilter([
-        `[0:v]setpts=${ptsMultiplier}*PTS[v]`,
+        `[0:v]setpts=${ptsMultiplier}*PTS,minterpolate=fps=${sourceFps}:mi_mode=blend[v]`,
       ])
       .outputOptions([
         "-map [v]",
@@ -135,7 +142,7 @@ function slowMotionSync(videoPath, audioPath, outputPath, slowFactor) {
         }
       })
       .on("end", () => {
-        spinner.succeed("Slow motion sync complete");
+        spinner.succeed("Slow motion sync complete (motion-interpolated)");
         resolve();
       })
       .on("error", (err) => {
@@ -181,6 +188,19 @@ function getMediaDuration(filePath) {
     ffmpeg.ffprobe(filePath, (err, metadata) => {
       if (err) return resolve(null);
       resolve(metadata?.format?.duration || null);
+    });
+  });
+}
+
+function getVideoFps(filePath) {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      const stream = metadata?.streams?.find((s) => s.codec_type === "video");
+      const rate = stream?.r_frame_rate; // e.g. "30/1" or "30000/1001"
+      if (err || !rate) return resolve(30);
+      const [num, den] = rate.split("/").map(Number);
+      const fps = den ? num / den : num;
+      resolve(fps && fps > 0 && fps < 120 ? Math.round(fps) : 30);
     });
   });
 }

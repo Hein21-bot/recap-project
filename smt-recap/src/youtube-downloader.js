@@ -22,7 +22,11 @@ export async function downloadYouTube(url, onProgress) {
   return new Promise((resolve, reject) => {
     const args = [
       url,
-      "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+      // Capped at 2160p (4K) instead of 1080p — the old 1080 cap meant Step 8's
+      // "4K" export option always just upscaled a 1080p source (soft/blurry
+      // "fake 4K"). Now the real source resolution is used when available,
+      // and Step 8 itself never scales past whatever this download actually got.
+      "-f", "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
       "--merge-output-format", "mp4",
       "--ffmpeg-location", "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin",
       "-o", outputPath,

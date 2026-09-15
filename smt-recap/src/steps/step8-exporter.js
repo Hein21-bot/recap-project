@@ -89,13 +89,20 @@ export async function step8Export(options = {}) {
   const inputH = videoStream?.height || 1920;
   const isPortrait = inputH > inputW;
 
-  // Scale so the shorter dimension hits the target, maintaining aspect ratio
-  const targetShort = resolution === "4k" ? 2160 : 1080;
+  // Scale so the shorter dimension hits the target, maintaining aspect ratio.
+  // Never scale ABOVE the source's own resolution — yt-dlp caps downloads at
+  // 1080p, so picking "4K" here would just stretch existing pixels (soft,
+  // blurry "fake 4K") instead of adding real detail. Cap to whichever is smaller.
+  const requestedShort = resolution === "4k" ? 2160 : 1080;
+  const sourceShort = isPortrait ? inputW : inputH;
+  const targetShort = Math.min(requestedShort, sourceShort);
+  const wasCapped = targetShort < requestedShort;
   const scale = isPortrait
     ? `scale=${targetShort}:-2`   // portrait: fix width, auto height
     : `scale=-2:${targetShort}`;  // landscape: auto width, fix height
 
-  console.log(`[Step 8] Input: ${inputW}x${inputH} (${isPortrait ? "portrait" : "landscape"}) → scale: ${scale}`);
+  console.log(`[Step 8] Input: ${inputW}x${inputH} (${isPortrait ? "portrait" : "landscape"}) → scale: ${scale}`
+    + (wasCapped ? ` (capped from ${requestedShort} — source has no more detail than this)` : ""));
 
   const crf    = resolution === "4k" ? 18 : 18;
   const suffix = resolution === "4k" ? "_4K" : "_1080p";
@@ -103,22 +110,36 @@ export async function step8Export(options = {}) {
   const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
   const outputPath = `./output/final/smt-recap${suffix}_${timestamp}.mp4`;
 
+  // Final output frame width (matches what `scale` above produces), used to
+  // size the thumbnail and watermark relative to the actual exported frame.
+  const outputW = isPortrait ? targetShort : Math.round(inputW * targetShort / inputH / 2) * 2;
+
   // Render thumbnail text PNG via Pango (supports Myanmar + English)
   let thumbnailPng = null;
   if (thumbnailText) {
-    const outputW = isPortrait ? targetShort : Math.round(inputW * targetShort / inputH);
     thumbnailPng = await renderThumbnailPng(thumbnailText, outputW);
     console.log("[Step 8] Thumbnail PNG rendered:", thumbnailPng);
   }
 
-  await exportVideo(inputPath, outputPath, { crf, preset: "slow", scale }, thumbnailPng);
+  // Watermark image, chosen in the UI from ./assets/*, falling back to the default.
+  const watermarkPath = path.resolve("./assets", options.watermarkImage || "watermark.png");
+  const finalWatermarkPath = fs.existsSync(watermarkPath) ? watermarkPath : WATERMARK_IMG;
+  // Size relative to the OUTPUT frame width, not the watermark file's own
+  // resolution — the old `scale=iw/8` made it tiny regardless of video size.
+  const watermarkSizePct = Number(options.watermarkSizePct) || Number(process.env.WATERMARK_WIDTH_PCT) * 100 || 16;
+  const watermarkWidthPx = Math.round(outputW * (watermarkSizePct / 100));
+  // Margin from the frame edges, also resolution-relative (was a hardcoded 20px).
+  const watermarkPaddingPct = Number(options.watermarkPaddingPct) || Number(process.env.WATERMARK_PADDING_PCT) || 2;
+  const watermarkPaddingPx = Math.round(outputW * (watermarkPaddingPct / 100));
+
+  await exportVideo(inputPath, outputPath, { crf, preset: "slow", scale }, thumbnailPng, finalWatermarkPath, options.watermarkPosition || "top-right", watermarkWidthPx, watermarkPaddingPx);
 
   const fileSize = getFileSize(outputPath);
-  saveState({ step8: { completed: true, exportPath: outputPath, resolution, completedAt: new Date().toISOString() } });
+  saveState({ step8: { completed: true, exportPath: outputPath, resolution, resolutionCapped: wasCapped, completedAt: new Date().toISOString() } });
 
   logger.success(`\nExport complete!`);
   logger.info(`Output: ${outputPath}`);
-  logger.info(`Resolution: ${resolution} (${isPortrait ? "portrait" : "landscape"})`);
+  logger.info(`Resolution: ${resolution} (${isPortrait ? "portrait" : "landscape"})${wasCapped ? " — capped to source resolution, no upscale" : ""}`);
   logger.info(`File size: ${fileSize}`);
 
   // Clean up intermediate files to save disk space
@@ -143,7 +164,7 @@ export async function step8Export(options = {}) {
 
   printCompletionBanner(outputPath);
 
-  return { outputPath, fileSize };
+  return { outputPath, fileSize, resolutionCapped: wasCapped };
 }
 
 async function printReviewSummary(state, videoPath) {
@@ -189,9 +210,22 @@ async function printReviewSummary(state, videoPath) {
   console.log(chalk.cyan("═".repeat(60) + "\n"));
 }
 
-function exportVideo(inputPath, outputPath, preset, thumbnailPng = null) {
-  const hasWatermark  = fs.existsSync(WATERMARK_IMG);
+// x:y expressions for each corner. W/H = output frame, w/h = overlay image,
+// pad = margin in px from the edges (was a hardcoded 20 before).
+function watermarkPositionExpr(position, pad) {
+  const exprs = {
+    "top-left":     `${pad}:${pad}`,
+    "top-right":    `W-w-${pad}:${pad}`,
+    "bottom-left":  `${pad}:H-h-${pad}`,
+    "bottom-right": `W-w-${pad}:H-h-${pad}`,
+  };
+  return exprs[position] || exprs["top-right"];
+}
+
+function exportVideo(inputPath, outputPath, preset, thumbnailPng = null, watermarkPath = WATERMARK_IMG, watermarkPosition = "top-right", watermarkWidthPx = 180, watermarkPaddingPx = 20) {
+  const hasWatermark  = fs.existsSync(watermarkPath);
   const hasThumbnail  = thumbnailPng && fs.existsSync(thumbnailPng);
+  const wmPos = watermarkPositionExpr(watermarkPosition, watermarkPaddingPx);
 
   const codecOptions = [
     "-c:v", "libx264",
@@ -222,7 +256,7 @@ function exportVideo(inputPath, outputPath, preset, thumbnailPng = null) {
       let thumbIndex = -1;
 
       if (hasWatermark) {
-        inputs.push("-i", WATERMARK_IMG);
+        inputs.push("-i", watermarkPath);
         wmIndex = inputIndex++;
       }
       if (hasThumbnail) {
@@ -239,8 +273,8 @@ function exportVideo(inputPath, outputPath, preset, thumbnailPng = null) {
 
       if (wmIndex !== -1) {
         filters.push(
-          `[${wmIndex}:v]scale=iw/8:-1,format=rgba,colorchannelmixer=aa=0.75[wm]`,
-          `[${prevLabel}][wm]overlay=W-w-20:20[wmout]`
+          `[${wmIndex}:v]scale=${watermarkWidthPx}:-1,format=rgba,colorchannelmixer=aa=0.75[wm]`,
+          `[${prevLabel}][wm]overlay=${wmPos}[wmout]`
         );
         prevLabel = "wmout";
       }
