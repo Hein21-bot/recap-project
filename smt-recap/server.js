@@ -22,6 +22,7 @@ import { step7AddSubtitles } from "./src/steps/step7-subtitles.js";
 import { step8Export } from "./src/steps/step8-exporter.js";
 import { readJSON } from "./src/utils/file-helper.js";
 import { initDB, getSession, saveSession, resetSession } from "./src/utils/db.js";
+import { FFMPEG, FFPROBE } from "./src/utils/bin-paths.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -142,7 +143,6 @@ app.post("/api/step/1/generate", async (req, res) => {
       let videoDurationSeconds = null;
       try {
         const { execFileSync } = await import("child_process");
-        const FFPROBE = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffprobe";
         const out = execFileSync(FFPROBE, ["-v", "quiet", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1", "./input/video.mp4"], { encoding: "utf8" });
         videoDurationSeconds = parseFloat(out.split("=")[1]) || null;
         if (videoDurationSeconds) console.log("[Step 1] Video duration:", videoDurationSeconds.toFixed(1) + "s");
@@ -315,7 +315,6 @@ app.post("/api/step/6/sync", async (req, res) => {
 });
 
 // ── Subtitle box: preview frame + manual region ──────────────────────────────
-const FFMPEG_BIN = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
 const REGION_FILE = "./output/subtitle-region.json";
 
 // Grab a single frame from the downloaded video for the box-drawing UI.
@@ -327,7 +326,7 @@ app.get("/api/step/frame", async (req, res) => {
   const framePath = path.join(__dirname, "output", "frame-preview.jpg");
   try {
     const { execFileSync } = await import("child_process");
-    execFileSync(FFMPEG_BIN, [
+    execFileSync(FFMPEG, [
       "-ss", String(t), "-i", inputVideo,
       "-frames:v", "1", "-q:v", "3", "-y", framePath,
     ], { stdio: "pipe" });

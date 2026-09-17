@@ -11,8 +11,7 @@ import { execFileSync } from "child_process";
 import ora from "ora";
 import { logger } from "../utils/logger.js";
 import { saveState, writeFile } from "../utils/file-helper.js";
-
-const FFPROBE = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffprobe";
+import { FFPROBE } from "../utils/bin-paths.js";
 
 function getVideoDurationSeconds(videoPath) {
   try {

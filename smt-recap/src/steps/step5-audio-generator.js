@@ -12,6 +12,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { logger } from "../utils/logger.js";
 import { saveState, readJSON, writeBinaryFile, writeFile } from "../utils/file-helper.js";
 import { stripPauseMarkersForElevenLabs } from "./step4-vocal-formatter.js";
+import { FFMPEG, FFPROBE } from "../utils/bin-paths.js";
 
 // Gemini TTS voice options (closest equivalents to ElevenLabs styles)
 const GEMINI_VOICES = {
@@ -119,7 +120,6 @@ async function generateWithGemini(text, voiceKey, speedMultiplier, apiKey) {
     writeBinaryFile(rawPath, audioBuffer);
 
     const { execFileSync } = await import("child_process");
-    const FFMPEG = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
 
     if (speedMultiplier && speedMultiplier !== 1.0) {
       execFileSync(FFMPEG, ["-i", rawPath, "-filter:a", `atempo=${speedMultiplier}`, "-y", outputPath], { stdio: "pipe" });
@@ -233,7 +233,6 @@ async function generateWithClipchamp(text, voiceKey, speedMultiplier) {
     writeBinaryFile(rawPath, rawBuffer);
 
     const { execFileSync } = await import("child_process");
-    const FFMPEG = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
     execFileSync(FFMPEG, ["-i", rawPath, "-ar", "24000", "-ac", "1", "-y", outputPath], { stdio: "pipe" });
 
     const { readFileSync } = await import("fs");
@@ -312,7 +311,6 @@ async function generateWithElevenLabs(text, state, speedMultiplier, apiKey) {
 export async function getAudioDuration(audioPath) {
   const { execSync } = await import("child_process");
   try {
-    const FFPROBE = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffprobe";
     const output = execSync(
       `${FFPROBE} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`,
       { encoding: "utf-8", timeout: 10000 }

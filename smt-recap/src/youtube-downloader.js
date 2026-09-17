@@ -8,8 +8,7 @@ import fs from "fs";
 import { spawn } from "child_process";
 import { ensureDir } from "./utils/file-helper.js";
 import { logger } from "./utils/logger.js";
-
-const YT_DLP = "/opt/homebrew/bin/yt-dlp";
+import { YT_DLP, FFMPEG_BIN_DIR } from "./utils/bin-paths.js";
 
 export async function downloadYouTube(url, onProgress) {
   ensureDir("./input");
@@ -28,7 +27,7 @@ export async function downloadYouTube(url, onProgress) {
       // and Step 8 itself never scales past whatever this download actually got.
       "-f", "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]",
       "--merge-output-format", "mp4",
-      "--ffmpeg-location", "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin",
+      "--ffmpeg-location", FFMPEG_BIN_DIR,
       "-o", outputPath,
       "--no-playlist",
       "--newline",

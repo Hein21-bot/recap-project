@@ -8,6 +8,7 @@ import ora from "ora";
 import chalk from "chalk";
 import { logger } from "../utils/logger.js";
 import { saveState, readJSON, fileExists, getFileSize } from "../utils/file-helper.js";
+import { FFMPEG as FFMPEG_FULL, PANGO_VIEW as PANGO, IMAGEMAGICK as CONVERT } from "../utils/bin-paths.js";
 
 const require = createRequire(import.meta.url);
 const ffmpeg = require("fluent-ffmpeg");
@@ -15,11 +16,8 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const FFMPEG_FULL  = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
-const PANGO        = "/opt/homebrew/bin/pango-view";
-const CONVERT      = "/opt/homebrew/bin/convert";
 const WATERMARK_IMG = path.resolve("./assets/watermark.png");
-if (fs.existsSync(FFMPEG_FULL)) ffmpeg.setFfmpegPath(FFMPEG_FULL);
+ffmpeg.setFfmpegPath(FFMPEG_FULL);
 
 const EXPORT_PRESETS = {
   "4k": {

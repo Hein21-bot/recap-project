@@ -7,13 +7,13 @@ import ora from "ora";
 import { logger } from "../utils/logger.js";
 import { saveState, readJSON, writeFile, fileExists } from "../utils/file-helper.js";
 import { createRequire } from "module";
+import { FFMPEG as FFMPEG_FULL, FFPROBE, PANGO_VIEW, IMAGEMAGICK, PYTHON3 } from "../utils/bin-paths.js";
 
 const require = createRequire(import.meta.url);
 const ffmpeg = require("fluent-ffmpeg");
 const fs = require("fs");
 
-const FFMPEG_FULL = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
-if (fs.existsSync(FFMPEG_FULL)) ffmpeg.setFfmpegPath(FFMPEG_FULL);
+ffmpeg.setFfmpegPath(FFMPEG_FULL);
 
 export async function step7AddSubtitles(options = {}) {
   logger.step(7, "Adding subtitles and visual effects...");
@@ -37,7 +37,6 @@ export async function step7AddSubtitles(options = {}) {
   let audioDuration = null;
   if (fs.existsSync(audioPath)) {
     const { execFileSync } = require("child_process");
-    const FFPROBE = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffprobe";
     try {
       const out = execFileSync(FFPROBE, [
         "-v", "quiet", "-show_entries", "format=duration",
@@ -112,8 +111,7 @@ async function tryForcedAlign(audioPath) {
   }
 
   logger.info("Running forced alignment for precise subtitle timing...");
-  const PYTHON = "/opt/homebrew/bin/python3";
-  const result = spawnSync(PYTHON, [scriptPy, "--audio", audioPath, "--transcript", transcriptPath, "--output", outputPath], {
+  const result = spawnSync(PYTHON3, [scriptPy, "--audio", audioPath, "--transcript", transcriptPath, "--output", outputPath], {
     encoding: "utf8",
     timeout: 120000,
   });
@@ -317,8 +315,7 @@ function detectSubtitleY(videoPath) {
   const path = require("path");
   const { execFileSync, spawnSync } = require("child_process");
 
-  const FFMPEG_BIN = fs.existsSync(FFMPEG_FULL) ? FFMPEG_FULL : "ffmpeg";
-  const PYTHON = "/opt/homebrew/bin/python3";
+  const FFMPEG_BIN = FFMPEG_FULL;
 
   const tmpDir = path.join(os.tmpdir(), `smt-subY-${Date.now()}`);
   fs.mkdirSync(tmpDir, { recursive: true });
@@ -370,7 +367,7 @@ if row_counts:
   const scriptPath = path.join(tmpDir, "detect_y.py");
   fs.writeFileSync(scriptPath, script, "utf8");
 
-  const result = spawnSync(PYTHON, [scriptPath, tmpDir], { encoding: "utf8" });
+  const result = spawnSync(PYTHON3, [scriptPath, tmpDir], { encoding: "utf8" });
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
   console.log("[Step 7 detect] status:", result.status, "stdout:", JSON.stringify(result.stdout?.trim()));
@@ -408,7 +405,6 @@ function toPixelRegion(norm, dims) {
 
 function getVideoDimensions(videoPath) {
   const { execFileSync } = require("child_process");
-  const FFPROBE = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffprobe";
   try {
     const out = execFileSync(FFPROBE, [
       "-v", "error",
@@ -432,9 +428,9 @@ function burnSubtitles(videoPath, srtPath, outputPath, videoDims = { w: 1080, h:
     const path = require("path");
     const { execFileSync } = require("child_process");
 
-    const FFMPEG_BIN = fs.existsSync(FFMPEG_FULL) ? FFMPEG_FULL : "ffmpeg";
-    const PANGO = "/opt/homebrew/bin/pango-view";
-    const CONVERT = "/opt/homebrew/bin/convert"; // ImageMagick
+    const FFMPEG_BIN = FFMPEG_FULL;
+    const PANGO = PANGO_VIEW;
+    const CONVERT = IMAGEMAGICK;
 
     const srtContent = fs.readFileSync(srtPath, "utf8");
     const entries = parseSRT(srtContent);

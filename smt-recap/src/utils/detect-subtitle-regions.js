@@ -7,9 +7,7 @@ import { execFileSync, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-
-const FFMPEG_FULL = "/opt/homebrew/Cellar/ffmpeg-full/8.1.1/bin/ffmpeg";
-const PYTHON = "/opt/homebrew/bin/python3";
+import { FFMPEG as FFMPEG_FULL, PYTHON3 as PYTHON } from "./bin-paths.js";
 
 const DETECT_SCRIPT = `
 import sys, os
