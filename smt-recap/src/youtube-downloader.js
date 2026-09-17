@@ -66,15 +66,30 @@ export async function downloadYouTube(url, onProgress) {
 export async function getVideoInfo(url) {
   return new Promise((resolve, reject) => {
     let raw = "";
+    let stderr = "";
+    let settled = false;
     const proc = spawn(YT_DLP, ["--dump-json", "--no-playlist", url], {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
+    // yt-dlp has to solve YouTube's anti-bot JS challenge before it can even
+    // start fetching info, which can take well over 15s on a slow connection
+    // or an older/uncached yt-dlp — the old 15s timeout killed it mid-solve.
+    const timer = setTimeout(() => {
+      settled = true;
+      proc.kill();
+      reject(new Error("Video info fetch timed out (45s) — check your internet connection, or run 'yt-dlp -U' to update yt-dlp"));
+    }, 45000);
+
     proc.stdout.on("data", (d) => { raw += d.toString(); });
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
 
     proc.on("close", (code) => {
+      if (settled) return;
+      clearTimeout(timer);
+      settled = true;
       if (code !== 0) {
-        reject(new Error(`Could not fetch video info (exit ${code})`));
+        reject(new Error(`Could not fetch video info (exit ${code}): ${stderr.slice(-300) || "no error output"}`));
         return;
       }
       try {
@@ -91,10 +106,11 @@ export async function getVideoInfo(url) {
     });
 
     proc.on("error", (err) => {
-      reject(new Error(`yt-dlp not found: ${err.message}`));
+      if (settled) return;
+      clearTimeout(timer);
+      settled = true;
+      reject(new Error(`yt-dlp not found at "${YT_DLP}": ${err.message}. Check with 'which yt-dlp' and install with: brew install yt-dlp`));
     });
-
-    setTimeout(() => { proc.kill(); reject(new Error("Video info fetch timed out")); }, 15000);
   });
 }
 
